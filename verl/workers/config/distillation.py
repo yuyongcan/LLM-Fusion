@@ -66,6 +66,34 @@ class DistillationLossConfig(BaseConfig):
         push the student past the teacher along the teacher-minus-reference direction, and the
         paper reports 1.25 as consistently better and 1.5 as unstable. Requires a reference
         policy, which is the frozen initial student; see need_reference_policy().
+    rep_coef (float):
+        Weight of the representation-distillation term (OPRD,
+        https://arxiv.org/abs/2606.06021), which aligns student and teacher hidden states
+        instead of only their output distributions. 0.0 (default) disables it and is
+        bit-for-bit the behaviour from before this knob existed. Requires
+        distillation.mode="in_process", since only the in-process teacher can return hidden
+        states. Composes additively with the output-space loss: L = L_opd + rep_coef * L_rep.
+        Note the scale interacts with rep_normalize -- a normalized MSE is much smaller than an
+        unnormalized one, so a coefficient tuned for one is wrong for the other.
+    rep_layers (tuple[int, ...]):
+        Which layers to align, indexed into HF hidden_states, where 0 is the embedding output
+        and k is the output of block k. Layer 0 is rejected: it carries no teacher computation,
+        only the embedding table. The default samples four points up the stack rather than all
+        of them -- all 36 layers of a 4B model over a 2000-token suffix is ~350 MB per sample,
+        and the cost is linear in this list.
+    rep_last_k (int):
+        Align only the final k response tokens. OPRD's figure 8 measures where the two models
+        actually disagree: the first k tokens of a response sit above 97% cosine similarity for
+        every k, while the last k start at 91.65% and stay 4+ points lower. Supervising the
+        prefix therefore spends memory on positions that carry no residual signal.
+    rep_normalize (bool):
+        L2-normalize both hidden states before the MSE, making the loss scale-invariant and
+        purely directional. True (default) matches the reference implementation's shipped
+        behaviour; False compares raw vectors, which keeps magnitude information (hidden-state
+        norms vary several-fold across positions, and massive-activation dimensions dominate)
+        but leaves the loss scale tied to the model's activation scale, so rep_coef must then
+        be far smaller. The OPRD authors note their own paper numbers used the unnormalized
+        form with a much larger coefficient.
     loss_settings (DistillationLossSettings, optional):
         Runtime-populated settings based on loss_mode. Not set by user.
     """
@@ -85,6 +113,13 @@ class DistillationLossConfig(BaseConfig):
 
     # lambda of G-OPD/ExOPD. 1.0 is standard OPD; >1.0 is reward extrapolation.
     reward_extrapolation_lambda: float = 1.0
+
+    # Representation distillation (OPRD, https://arxiv.org/abs/2606.06021): align hidden states
+    # instead of, or in addition to, the output distribution. 0.0 leaves it off.
+    rep_coef: float = 0.0
+    rep_layers: tuple[int, ...] = (9, 18, 27, 36)
+    rep_last_k: int = 2000
+    rep_normalize: bool = True
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size
@@ -147,6 +182,36 @@ class DistillationLossConfig(BaseConfig):
                     "reward INTERPOLATION: the student is pulled toward a point between the reference "
                     "and the teacher, i.e. deliberately weaker than the teacher."
                 )
+
+        self._validate_representation_distillation()
+
+    def _validate_representation_distillation(self) -> None:
+        """Validate the representation-distillation term (OPRD)."""
+        if self.rep_coef == 0.0:
+            # Off: the term is never computed, so none of the other knobs can matter.
+            return
+        if self.rep_coef < 0.0:
+            raise ValueError(
+                f"rep_coef={self.rep_coef} must be >= 0. A negative coefficient would reward "
+                "the student for moving its representations away from the teacher's."
+            )
+        if not self.rep_layers:
+            raise ValueError("rep_coef > 0 requires a non-empty rep_layers.")
+        if len(set(self.rep_layers)) != len(self.rep_layers):
+            raise ValueError(f"rep_layers has duplicates: {list(self.rep_layers)}.")
+        for layer in self.rep_layers:
+            if layer < 1:
+                # Index 0 of HF hidden_states is the embedding output. Aligning it distils the
+                # embedding table rather than any computation the teacher performed, and for a
+                # student that starts from the teacher's own base it is very nearly a no-op.
+                # The reference implementation likewise starts its "all layers" range at 1.
+                raise ValueError(
+                    f"rep_layers contains {layer}, but layers are indexed into HF hidden_states "
+                    "where 0 is the embedding output; supervising it distils the embedding "
+                    "table, not teacher computation. Use 1..num_hidden_layers."
+                )
+        if self.rep_last_k < 1:
+            raise ValueError(f"rep_last_k={self.rep_last_k} must be >= 1.")
 
 
 @dataclass
@@ -305,6 +370,16 @@ class DistillationConfig(BaseConfig):
 
         if self.mode not in ("vllm", "in_process"):
             raise ValueError(f"distillation.mode must be 'vllm' or 'in_process', got {self.mode!r}.")
+
+        if self.distillation_loss.rep_coef > 0.0 and self.mode != "in_process":
+            # Only the in-process HF teacher can return hidden states. The vLLM teacher exposes
+            # prompt_logprobs and nothing else, so this combination would train plain OPD while
+            # every log line claimed representation distillation was on.
+            raise ValueError(
+                f"distillation_loss.rep_coef={self.distillation_loss.rep_coef} > 0 requires "
+                f"distillation.mode='in_process', got {self.mode!r}: hidden states are only "
+                "available from the in-process HF teacher."
+            )
 
         if self.mode == "in_process":
             self._validate_in_process()
