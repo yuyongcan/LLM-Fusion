@@ -112,7 +112,8 @@ CKPT_CONTENTS=${CKPT_CONTENTS:-'["model"]'}
 
 LOG_DIR=${B}/logs/llm_fusion
 mkdir -p "${LOG_DIR}"
-LOG=${LOG_DIR}/train_mopd_merged_${NNODES}x${NGPUS_PER_NODE}_$(date +%Y%m%d_%H%M%S).log
+# 可被 run_mopd_exopd.sh 覆盖，让 ExOPD 的日志与 λ=1 基线在 ls 里就能分开。
+LOG=${LOG:-${LOG_DIR}/train_mopd_merged_${NNODES}x${NGPUS_PER_NODE}_$(date +%Y%m%d_%H%M%S).log}
 
 export PATH="/opt/conda/envs/torch-base/bin:${PATH}"
 

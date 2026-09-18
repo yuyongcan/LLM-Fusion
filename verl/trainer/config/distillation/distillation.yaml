@@ -54,6 +54,28 @@ distillation_loss:
   # Upper bound for PPO clipping ratio.
   clip_ratio_high: 0.2
 
+  # Reward scaling factor lambda of Generalized On-Policy Distillation
+  # (ExOPD, https://arxiv.org/abs/2602.12125).
+  #
+  # Standard OPD is a dense KL-constrained RL whose implicit reward log(teacher/reference)
+  # and KL regularization are forced to weigh the same. This is that weight ratio:
+  #
+  #   advantage = (log pi_teacher - log pi_student)
+  #             + (lambda - 1) * (log pi_teacher - log pi_reference)
+  #
+  #   1.0   standard OPD -- bit-for-bit the behaviour before this knob existed, and the
+  #         only value that needs no reference policy.
+  #   >1.0  reward extrapolation (ExOPD): step past the teacher along teacher-minus-reference.
+  #         The paper uses 1.25 throughout and reports 1.5 as unstable, the student starting
+  #         to hack the implicit reward by chasing tokens with a large log ratio.
+  #   <1.0  reward interpolation: deliberately lands between reference and teacher.
+  #
+  # Non-1.0 values require an estimator loss_mode (k1, k3, ...) and use_policy_gradient=true,
+  # and they switch on the reference policy worker -- one extra frozen model plus one extra
+  # forward pass per step. The reference is the frozen initial student, which is what this
+  # formula wants whenever the student starts from the same base the teachers were built on.
+  reward_extrapolation_lambda: 1.0
+
 
 # Number of GPUs per node in the distillation teacher resource pool
 n_gpus_per_node: 8

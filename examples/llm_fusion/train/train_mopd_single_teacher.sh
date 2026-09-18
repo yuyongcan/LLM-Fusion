@@ -118,6 +118,33 @@ DISTILLATION_LOSS_MODE=${DISTILLATION_LOSS_MODE:-k1}
 USE_POLICY_GRADIENT=${USE_POLICY_GRADIENT:-True}
 USE_TASK_REWARDS=${USE_TASK_REWARDS:-False}
 
+# ---- reward extrapolation (ExOPD, https://arxiv.org/abs/2602.12125) ----
+# Standard OPD is a dense KL-constrained RL whose implicit reward and KL regularization are
+# forced to weigh the same, which is why an OPD student tracks its teacher but rarely passes
+# it. This is that weight, lambda:
+#
+#   advantage = (log pi_teacher - log pi_student)
+#             + (lambda - 1) * (log pi_teacher - log pi_reference)
+#
+# Default 1.0 = standard OPD, bit-for-bit what this script did before the knob existed.
+# 1.25 is the paper's value across every setting it reports; 1.5 it reports as unstable.
+#
+# pi_reference is verl's own `ref` worker, which loads actor_rollout_ref.model.path -- the
+# frozen initial student. That is exactly the reference this formula wants here, because the
+# student starts from the same base the teacher was built from. Nothing extra to configure.
+#
+# ⚠️ The reference implementation at code/G-OPD names things the other way round
+# (there `ref_log_prob` is the TEACHER and `base_log_prob` is the reference), because
+# verl 0.6.1 had no teacher pool and had to repurpose the ref worker. Do not port its
+# names across; this fork keeps the paper's meaning.
+#
+# ⚠️ lambda != 1.0 builds the reference model inside the training pool: one extra frozen 4B
+# model per training GPU plus one extra forward pass per step. No extra GPUs are needed
+# (verl fuses it into ActorRolloutRefWorker on the same pool), but expect a slower step.
+# It also makes the REF array below actually do something -- at lambda=1.0 that worker is
+# never built, so `param_offload` there has always been a no-op.
+REWARD_EXTRAPOLATION_LAMBDA=${REWARD_EXTRAPOLATION_LAMBDA:-1.0}
+
 # ---- bookkeeping ----
 PROJECT_NAME=${PROJECT_NAME:-llm_fusion}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-mopd_merged_teacher_qwen3_4b}
@@ -246,6 +273,7 @@ DISTILL=(
     distillation.distillation_loss.use_policy_gradient=${USE_POLICY_GRADIENT}
     distillation.distillation_loss.loss_max_clamp=10.0
     distillation.distillation_loss.log_prob_min_clamp=-10.0
+    distillation.distillation_loss.reward_extrapolation_lambda=${REWARD_EXTRAPOLATION_LAMBDA}
 )
 
 python3 -m verl.trainer.main_ppo \

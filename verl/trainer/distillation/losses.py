@@ -371,6 +371,9 @@ def compute_distillation_loss_reverse_kl_estimator(
     Uses the kl_penalty function from core_algos which supports various KL divergence
     estimators: "kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3".
 
+    When distillation_loss.reward_extrapolation_lambda != 1.0, the G-OPD/ExOPD term
+    (https://arxiv.org/abs/2602.12125) is subtracted; see below.
+
     Returns:
     - distillation_losses: (bsz, resp_len)
     - distillation_metrics: Dictionary of metrics.
@@ -391,4 +394,49 @@ def compute_distillation_loss_reverse_kl_estimator(
     metrics = {
         "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask_bool].abs().mean()),
     }
+
+    # Reward extrapolation (ExOPD). With use_policy_gradient, the caller turns this into
+    # `advantages = -distillation_losses`, so for k1 the advantage is currently
+    # (log pi_teacher - log pi_student) -- exactly standard OPD. Subtracting
+    # (lambda - 1) * (teacher - reference) here makes the advantage
+    #
+    #   (log pi_teacher - log pi_student) + (lambda - 1)(log pi_teacher - log pi_reference)
+    #
+    # which is the G-OPD advantage. At lambda == 1.0 the term is identically zero, so that
+    # path is left untouched rather than computed and multiplied by 0.
+    #
+    # Subtracting before the caller's loss_max_clamp is deliberate: the clamp then also bounds
+    # the extrapolation, which is the term that destabilises training at large lambda.
+    extrapolation_lambda = loss_config.reward_extrapolation_lambda
+    if extrapolation_lambda != 1.0:
+        if "ref_log_prob" not in data.keys():
+            # Silently falling back to standard OPD here would be indistinguishable from a
+            # working ExOPD run in every log line and metric, so refuse instead.
+            raise ValueError(
+                f"reward_extrapolation_lambda={extrapolation_lambda} needs reference-policy log "
+                "probs, but 'ref_log_prob' is not in the batch. The reference worker is only "
+                "built when need_reference_policy() says so -- check that it accounts for "
+                "reward extrapolation."
+            )
+        # ref_log_prob is written by _compute_ref_log_prob already sliced to the response and
+        # is not touched by left_right_2_no_padding, so it is plain (bsz, resp_len) here --
+        # the same shape the student and teacher tensors were just converted into.
+        ref_log_probs = data["ref_log_prob"]
+        if ref_log_probs.is_nested:
+            ref_log_probs = ref_log_probs.to_padded_tensor(0.0)
+        assert ref_log_probs.shape == student_log_probs.shape, (
+            f"ref_log_prob {tuple(ref_log_probs.shape)} != student log probs "
+            f"{tuple(student_log_probs.shape)}"
+        )
+        extrapolation = (extrapolation_lambda - 1.0) * (teacher_log_probs - ref_log_probs)
+        distillation_losses = distillation_losses - extrapolation
+        metrics["distillation/extrapolation_term"] = Metric(
+            AggregationType.MEAN, extrapolation[response_mask_bool].mean()
+        )
+        # How far the teacher has moved from the reference. This is the implicit reward the
+        # extrapolation scales up, so if it is ~0 there is nothing for lambda to amplify.
+        metrics["distillation/teacher_ref_gap"] = Metric(
+            AggregationType.MEAN, (teacher_log_probs - ref_log_probs)[response_mask_bool].abs().mean()
+        )
+
     return distillation_losses, metrics

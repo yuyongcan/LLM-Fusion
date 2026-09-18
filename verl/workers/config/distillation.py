@@ -58,6 +58,14 @@ class DistillationLossConfig(BaseConfig):
         Lower bound for PPO clipping ratio.
     clip_ratio_high (float):
         Upper bound for PPO clipping ratio.
+    reward_extrapolation_lambda (float):
+        Reward scaling factor lambda of Generalized On-Policy Distillation
+        (https://arxiv.org/abs/2602.12125). Standard OPD weights the implicit reward
+        log(teacher/reference) and the KL regularization equally; lambda controls that ratio.
+        1.0 reproduces standard OPD exactly. Values above 1.0 ("reward extrapolation", ExOPD)
+        push the student past the teacher along the teacher-minus-reference direction, and the
+        paper reports 1.25 as consistently better and 1.5 as unstable. Requires a reference
+        policy, which is the frozen initial student; see need_reference_policy().
     loss_settings (DistillationLossSettings, optional):
         Runtime-populated settings based on loss_mode. Not set by user.
     """
@@ -74,6 +82,9 @@ class DistillationLossConfig(BaseConfig):
     clip_ratio: float = 0.2
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.2
+
+    # lambda of G-OPD/ExOPD. 1.0 is standard OPD; >1.0 is reward extrapolation.
+    reward_extrapolation_lambda: float = 1.0
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size
@@ -110,6 +121,32 @@ class DistillationLossConfig(BaseConfig):
                 "Directly backpropagating k1 loss is incorrect since gradient of k1 loss"
                 " wrt model weights does not depend on teacher log probabilities."
             )
+
+        # Reward extrapolation adds (lambda - 1) * (teacher - reference) to the per-token
+        # implicit reward, which is only defined where the loss IS a difference of log
+        # probabilities. Fail here rather than eight minutes into a run.
+        if self.reward_extrapolation_lambda != 1.0:
+            if self.loss_settings.use_topk:
+                raise ValueError(
+                    f"reward_extrapolation_lambda={self.reward_extrapolation_lambda} requires a "
+                    f"log-prob-difference loss, but loss_mode={self.loss_mode!r} is a top-k "
+                    "distributional loss whose value is not log pi_student - log pi_teacher. "
+                    "Use an estimator loss such as k1, or leave the lambda at 1.0."
+                )
+            if not self.use_policy_gradient:
+                raise ValueError(
+                    f"reward_extrapolation_lambda={self.reward_extrapolation_lambda} requires "
+                    "use_policy_gradient=True. The extrapolation term is detached and only "
+                    "reaches the model through the advantage, so with the supervised path it "
+                    "would shift the loss without changing a single gradient."
+                )
+            if self.reward_extrapolation_lambda < 1.0:
+                # Interpolation is a valid part of G-OPD, but it is not what MOPD wants, so say so.
+                print(
+                    f"WARNING: reward_extrapolation_lambda={self.reward_extrapolation_lambda} < 1.0 is "
+                    "reward INTERPOLATION: the student is pulled toward a point between the reference "
+                    "and the teacher, i.e. deliberately weaker than the teacher."
+                )
 
 
 @dataclass

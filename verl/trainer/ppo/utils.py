@@ -76,7 +76,28 @@ def need_reference_policy(
     config: DictConfig,
 ) -> bool:
     """Given the config, do we need ref policy."""
-    return config.algorithm.get("use_kl_in_reward", False) or config.actor_rollout_ref.actor.use_kl_loss
+    return (
+        config.algorithm.get("use_kl_in_reward", False)
+        or config.actor_rollout_ref.actor.use_kl_loss
+        or need_reference_policy_for_distillation(config)
+    )
+
+
+def need_reference_policy_for_distillation(
+    config: DictConfig,
+) -> bool:
+    """Does distillation need a reference policy?
+
+    Only when reward extrapolation is on. G-OPD's advantage
+    (https://arxiv.org/abs/2602.12125) carries a (lambda - 1) * (teacher - reference) term,
+    so lambda != 1.0 needs reference log probs, while plain on-policy distillation
+    (lambda == 1.0) does not and should not pay for the extra frozen model.
+    """
+    distillation_config = config.get("distillation")
+    if not is_distillation_enabled(distillation_config):
+        return False
+    distillation_loss = distillation_config.get("distillation_loss") or {}
+    return distillation_loss.get("reward_extrapolation_lambda", 1.0) != 1.0
 
 
 def need_teacher_policy(
