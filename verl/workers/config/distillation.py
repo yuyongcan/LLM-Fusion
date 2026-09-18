@@ -249,10 +249,17 @@ class DistillationConfig(BaseConfig):
 
     enabled (bool):
         Whether on-policy distillation is enabled.
+    mode (str):
+        Where the teacher runs. "vllm" (default) serves the teacher from a dedicated vLLM
+        resource pool and computes its log probs per sample during rollout. "in_process" loads
+        the teacher as a frozen HF model fused into ActorRolloutRefWorker -- like the reference
+        policy -- and computes log probs as one batched forward between ref_log_prob and
+        update_actor, while vLLM is asleep. "in_process" claims no teacher pool (give those GPUs
+        to trainer.nnodes), supports exactly one teacher, and requires an estimator loss_mode.
     n_gpus_per_node (int):
-        Number of GPUs per node in the teacher resource pool.
+        Number of GPUs per node in the teacher resource pool. Must be 0 when mode="in_process".
     nnodes (int):
-        Number of nodes in the teacher resource pool.
+        Number of nodes in the teacher resource pool. Must be 0 when mode="in_process".
     teacher_models (dict[str, TeacherModelConfig]):
         Configurations for teacher models used for multi-teacher distillation.
     teacher_key (str):
@@ -285,6 +292,7 @@ class DistillationConfig(BaseConfig):
     _mutable_fields = BaseConfig._mutable_fields | {"teacher_models", "n_gpus_per_node", "nnodes"}
 
     enabled: bool = False
+    mode: str = "vllm"
     n_gpus_per_node: int = 0
     nnodes: int = 0
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
@@ -293,6 +301,13 @@ class DistillationConfig(BaseConfig):
 
     def __post_init__(self):
         if not self.enabled:
+            return
+
+        if self.mode not in ("vllm", "in_process"):
+            raise ValueError(f"distillation.mode must be 'vllm' or 'in_process', got {self.mode!r}.")
+
+        if self.mode == "in_process":
+            self._validate_in_process()
             return
 
         self.teacher_models = self._resolve_teacher_models()
@@ -310,6 +325,41 @@ class DistillationConfig(BaseConfig):
                 f"the distillation resource pool size "
                 f"({self.n_gpus_per_node=} * {self.nnodes=} = {total_pool_size})."
             )
+
+    def _validate_in_process(self) -> None:
+        """Validate the in-process (HF) teacher mode.
+
+        This mode runs the teacher as a frozen HF model fused into ActorRolloutRefWorker, the
+        same way the reference policy is fused, so it claims no resource pool of its own. Every
+        check here is a config-time failure for something that would otherwise either strand
+        GPUs or surface as a wrong number many minutes into a run.
+        """
+        if len(self.teacher_models) != 1:
+            # Per-sample routing needs one live engine per teacher; a single in-process teacher
+            # cannot serve several routing keys, and N resident teachers is not the design.
+            raise ValueError(
+                f"distillation.mode='in_process' supports exactly one teacher, got "
+                f"{len(self.teacher_models)}: {sorted(self.teacher_models)}. Use mode='vllm' for "
+                "multi-teacher routing."
+            )
+        if self.n_gpus_per_node * self.nnodes != 0:
+            # The teacher pool would be created and then never used, silently stranding GPUs.
+            raise ValueError(
+                f"distillation.mode='in_process' must not request a teacher resource pool, but got "
+                f"{self.n_gpus_per_node=} * {self.nnodes=}. Set both to 0 and give those GPUs to "
+                "trainer.nnodes instead."
+            )
+        if self.distillation_loss.loss_settings.use_topk:
+            # In-process teacher returns the sampled-token log prob, not a top-k slice.
+            raise ValueError(
+                f"distillation.mode='in_process' does not support top-k distillation "
+                f"(loss_mode={self.distillation_loss.loss_mode!r}). Use an estimator loss_mode "
+                "(k1, k3, ...) or mode='vllm'."
+            )
+
+        teacher_model = next(iter(self.teacher_models.values()))
+        if not teacher_model.model_path:
+            raise ValueError("distillation.mode='in_process' requires teacher_models.*.model_path to be set.")
 
     def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
         assert "teacher_model" in self.teacher_models

@@ -81,9 +81,14 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         data["routed_experts"] = routed_experts_nested
 
     # (bsz, seqlen, topk)
+    # This is the vLLM teacher layout only: those log probs span prompt+response and arrive
+    # alongside teacher_ids, so they need converting to jagged like input_ids. The in-process HF
+    # teacher (distillation.mode="in_process") instead produces a plain (bsz, response_len)
+    # tensor with no teacher_ids -- the same shape as ref_log_prob, which this function likewise
+    # leaves alone -- so it must fall through untouched. Requiring both keys keeps that true.
     teacher_logprobs = data.get("teacher_logprobs", None)
     teacher_ids = data.get("teacher_ids", None)
-    if teacher_logprobs is not None and teacher_ids is not None:
+    if teacher_logprobs is not None and teacher_ids is not None and not teacher_logprobs.is_nested:
         teacher_logprobs_rmpad = index_first_axis(teacher_logprobs.unsqueeze(-1).flatten(0, 1), indices)
         teacher_ids_rmpad = index_first_axis(teacher_ids.unsqueeze(-1).flatten(0, 1), indices)
         teacher_logprobs_nested = torch.nested.nested_tensor_from_jagged(

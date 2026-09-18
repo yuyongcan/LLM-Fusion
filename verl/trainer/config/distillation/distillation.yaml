@@ -13,6 +13,20 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
+# Where the teacher runs.
+#
+#   vllm        (default) Teacher is served from the dedicated teacher resource pool below, and
+#               its log probs are computed per sample during rollout via prompt_logprobs.
+#   in_process  Teacher is a frozen HF model fused into ActorRolloutRefWorker, exactly like the
+#               reference policy: no teacher pool (set nnodes/n_gpus_per_node to 0 and give those
+#               GPUs to trainer.nnodes), one batched forward per step between ref_log_prob and
+#               update_actor, while vLLM is asleep. Supports exactly one teacher and requires an
+#               estimator loss_mode (k1, k3, ...). Unlike the vLLM path it has no
+#               temperature == 1.0 restriction, since an HF forward can scale logits freely.
+#
+# "vllm" reproduces the behaviour from before this knob existed bit-for-bit.
+mode: vllm
+
 # distillation loss config
 distillation_loss:
 

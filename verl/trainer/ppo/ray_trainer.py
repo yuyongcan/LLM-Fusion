@@ -55,6 +55,7 @@ from verl.trainer.ppo.utils import (
     WorkerType,
     need_critic,
     need_reference_policy,
+    need_in_process_teacher,
     need_reward_model,
     need_teacher_policy,
 )
@@ -343,6 +344,8 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_teacher_policy = need_teacher_policy(self.config)
+        # Distillation with the teacher fused into the actor worker instead of a vLLM pool.
+        self.in_process_teacher = need_in_process_teacher(self.config)
 
         self.use_rm = need_reward_model(self.config)
 
@@ -1017,7 +1020,9 @@ class RayPPOTrainer:
         self.async_rollout_mode = True
 
         # initialize teacher loop manager
-        if self.use_teacher_policy:
+        # Only the vLLM teacher mode needs it; the in-process teacher lives inside
+        # ActorRolloutRefWorker and is driven from _compute_teacher_log_prob instead.
+        if self.use_teacher_policy and not self.in_process_teacher:
             from verl.experimental.teacher_loop import MultiTeacherModelManager
 
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
@@ -1054,7 +1059,13 @@ class RayPPOTrainer:
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
             llm_client=self.llm_server_manager.get_client(),
-            teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
+            # None disables teacher log probs in the agent loop, which is what the in-process
+            # mode wants: the teacher runs once per step in the trainer, not per sample here.
+            teacher_client=(
+                self.teacher_model_manager.get_client()
+                if (self.use_teacher_policy and not self.in_process_teacher)
+                else None
+            ),
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
 
@@ -1355,6 +1366,35 @@ class RayPPOTrainer:
         ref_log_prob = DataProto.from_tensordict(ref_log_prob)
 
         return ref_log_prob
+
+    def _compute_teacher_log_prob(self, batch: DataProto) -> DataProto:
+        """Batched teacher log probs from the in-process HF teacher.
+
+        The vLLM teacher path produces these per sample during rollout, as a jagged tensor over
+        prompt+response. This path instead runs one forward here, between ref_log_prob and
+        update_actor, and so yields a plain (bsz, response_len) tensor -- the same layout as
+        ref_log_prob, left-shifted by one by no_padding_2_padding exactly as the ref/actor paths
+        are. The key is spelled the same in both modes; the loss discriminates on is_nested.
+
+        Placement matters: this must run after _balance_batch, which reorders rows, so that the
+        log probs line up with the batch they were computed from.
+        """
+        # step 1: convert dataproto to tensordict.
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to nopadding
+        batch_td = left_right_2_no_padding(batch_td)
+        # step 3: add meta info
+        tu.assign_non_tensor(batch_td, **{"calculate_entropy": False, "compute_loss": False})
+        output = self.actor_rollout_wg.compute_teacher_log_prob(batch_td)
+        # gather output
+        log_probs = tu.get(output, "log_probs")
+        # step 4. No padding to padding
+        log_probs = no_padding_2_padding(log_probs, batch_td)
+        # step 5: rebuild a tensordict and convert to dataproto
+        teacher_log_prob = tu.get_tensordict({"teacher_logprobs": log_probs.float()})
+        teacher_log_prob = DataProto.from_tensordict(teacher_log_prob)
+
+        return teacher_log_prob
 
     def _compute_old_log_prob(self, batch: DataProto):
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
@@ -1681,6 +1721,21 @@ class RayPPOTrainer:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                    if self.in_process_teacher:
+                        # Exactly one producer of teacher log probs. In mode="vllm" the agent
+                        # loop has already put them in the batch during rollout; here it must
+                        # not have, or the union below would silently overwrite one with the
+                        # other and every metric would still look healthy.
+                        assert "teacher_logprobs" not in batch.batch, (
+                            "teacher_logprobs is already in the batch before the in-process "
+                            "teacher ran, so both producers are active. Check that the agent "
+                            "loop's teacher client is disabled when distillation.mode is "
+                            "'in_process'."
+                        )
+                        with marked_timer("teacher_log_prob", timing_raw, color="purple"):
+                            teacher_log_prob = self._compute_teacher_log_prob(batch)
+                            batch = batch.union(teacher_log_prob)
 
                     # compute values
                     if self.use_critic:

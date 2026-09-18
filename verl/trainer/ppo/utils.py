@@ -14,6 +14,7 @@
 
 import warnings
 from enum import Enum
+from typing import Optional
 
 from omegaconf import DictConfig
 
@@ -105,6 +106,32 @@ def need_teacher_policy(
 ) -> bool:
     """Given the config, do we need distillation policy."""
     return is_distillation_enabled(config.get("distillation"))
+
+
+def distillation_mode(config: DictConfig) -> Optional[str]:
+    """Where the teacher runs, or None when distillation is off."""
+    distillation_config = config.get("distillation")
+    if not is_distillation_enabled(distillation_config):
+        return None
+    return distillation_config.get("mode", "vllm")
+
+
+def need_teacher_pool(
+    config: DictConfig,
+) -> bool:
+    """Do we need the dedicated vLLM teacher resource pool?
+
+    Only in mode="vllm". The in-process teacher is fused into ActorRolloutRefWorker on the
+    existing global pool, so creating a teacher pool there would strand those GPUs.
+    """
+    return distillation_mode(config) == "vllm"
+
+
+def need_in_process_teacher(
+    config: DictConfig,
+) -> bool:
+    """Do we need a frozen HF teacher inside ActorRolloutRefWorker?"""
+    return distillation_mode(config) == "in_process"
 
 
 def need_reward_model(

@@ -448,11 +448,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.role = role
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
+        self.teacher: TrainingWorker = None
         self.rollout: BaseRollout = None
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
+
+        # The in-process teacher is keyed off the distillation config rather than the role string,
+        # which is a fixed vocabulary asserted just above. It only makes sense where the actor
+        # lives, since its log probs are consumed by the actor update.
+        self._teacher_model_path: Optional[str] = None
+        self._is_in_process_teacher = False
+        if self.distillation_enabled and self._is_actor:
+            if distillation_config.mode == "in_process":
+                # DistillationConfig.__post_init__ has already enforced exactly one teacher here.
+                teacher_model = next(iter(distillation_config.teacher_models.values()))
+                self._teacher_model_path = teacher_model.model_path
+                self._is_in_process_teacher = True
 
         if self._is_actor:
             omega_profiler_config = config.actor.get("profiler", {})
@@ -538,7 +551,78 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.ref.reset()
             self.set_dispatch_collect(mesh_name="ref", **self.ref.get_dispatch_collect())
 
-        # 2. build actor model
+        # 2. build in-process teacher model (distillation.mode="in_process")
+        #
+        # The teacher is a frozen HF model fused into this worker exactly like the ref model
+        # above: same ranks, same global pool, no teacher resource pool. It differs from ref in
+        # one respect -- it loads its own weights (the teacher checkpoint) rather than a copy of
+        # the actor's model_config -- so the ref block's `deepcopy(model_config)` is replaced by
+        # an HFModelConfig built from the teacher's model_path.
+        if self._is_in_process_teacher:
+            teacher_model_config: HFModelConfig = omega_conf_to_dataclass(
+                {
+                    "_target_": "verl.workers.config.HFModelConfig",
+                    "path": self._teacher_model_path,
+                    "trust_remote_code": model_config.get("trust_remote_code", False),
+                    "use_remove_padding": model_config.get("use_remove_padding", False),
+                },
+                dataclass_type=HFModelConfig,
+            )
+            # The teacher never drafts tokens, so MTP would only allocate unused heads.
+            teacher_model_config.mtp = MtpConfig(enable=False)
+
+            # A teacher with a different vocabulary would make the per-token log-prob difference
+            # meaningless while still producing finite numbers, so refuse instead of distilling
+            # noise. This mirrors how the loss refuses to fall back when ref log probs are absent.
+            student_vocab = model_config.hf_config.vocab_size
+            teacher_vocab = teacher_model_config.hf_config.vocab_size
+            if student_vocab != teacher_vocab:
+                raise ValueError(
+                    f"In-process teacher vocab_size ({teacher_vocab}) != student vocab_size "
+                    f"({student_vocab}). Per-token distillation requires a shared vocabulary; "
+                    f"teacher={self._teacher_model_path}."
+                )
+
+            # Reuse the ref role's forward-only/offload settings: the teacher has the same
+            # lifecycle (frozen, inference-only, one forward per step) and the ref config is
+            # already wired for it end to end.
+            #
+            # The ref block above renames config.ref's log_prob_* keys to ppo_* with a
+            # destructive pop, but it only runs when the ref role is active -- which it is not
+            # when ExOPD is off (lambda == 1.0). So read whichever spelling is present rather
+            # than assuming the rename already happened.
+            ref_cfg = self.config.ref
+            teacher_micro_bsz_per_gpu = ref_cfg.get(
+                "ppo_micro_batch_size_per_gpu", ref_cfg.get("log_prob_micro_batch_size_per_gpu", None)
+            )
+            teacher_use_dynamic_bsz = ref_cfg.get(
+                "use_dynamic_bsz", ref_cfg.get("log_prob_use_dynamic_bsz", False)
+            )
+            teacher_max_token_len_per_gpu = ref_cfg.get(
+                "ppo_max_token_len_per_gpu", ref_cfg.get("log_prob_max_token_len_per_gpu", None)
+            )
+
+            teacher_config: ActorConfig = omega_conf_to_dataclass(ref_cfg)
+            teacher_config.model_config = teacher_model_config
+
+            teacher_training_config = TrainingWorkerConfig(
+                model_type=teacher_model_config.get("model_type", "language_model"),
+                model_config=teacher_model_config,
+                engine_config=teacher_config.engine,
+                optimizer_config=teacher_config.optim,
+                checkpoint_config=teacher_config.checkpoint,
+            )
+
+            teacher_training_config.engine_config.use_dynamic_bsz = teacher_use_dynamic_bsz
+            teacher_training_config.engine_config.infer_max_token_len_per_gpu = teacher_max_token_len_per_gpu
+            teacher_training_config.engine_config.infer_micro_batch_size_per_gpu = teacher_micro_bsz_per_gpu
+            teacher_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
+
+            self.teacher = TrainingWorker(config=teacher_training_config)
+            self.teacher.reset()
+            self.set_dispatch_collect(mesh_name="teacher", **self.teacher.get_dispatch_collect())
+
+        # 3. build actor model
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
@@ -587,12 +671,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor.set_loss_fn(self.loss_fn)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
-        # 3. build rollout engine
+        # 4. build rollout engine
         if "rollout" in self.role:
             rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
 
             # TODO: move rollout_device_mesh into ServerAdapter
-            # 3.1 build rollout device mesh (sglang need only)
+            # 4.1 build rollout device mesh (sglang need only)
             infer_tp = rollout_config.tensor_model_parallel_size * rollout_config.data_parallel_size
             infer_pp = rollout_config.pipeline_model_parallel_size
             infer_world_size = infer_tp * infer_pp
@@ -604,7 +688,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 get_device_name(), mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
             )
 
-            # 3.2 initialize rollout engine
+            # 4.2 initialize rollout engine
             rollout_cls: type[BaseRollout] = get_rollout_class(rollout_config.name, rollout_config.mode)
             self.rollout = rollout_cls(
                 config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
@@ -615,7 +699,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
 
-        # 4. build checkpoint engine
+        # 5. build checkpoint engine
         if "actor" in self.role:
             checkpoint_engine_config = omega_conf_to_dataclass(self.config.rollout.checkpoint_engine)
             backend = checkpoint_engine_config.backend
@@ -636,6 +720,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
+        return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="teacher"))
+    @DistProfiler.annotate(color="purple", role="teacher_compute_log_prob")
+    @_with_routing_replay_flag(enabled=False)
+    def compute_teacher_log_prob(self, data: TensorDict) -> TensorDict:
+        output = self.teacher.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

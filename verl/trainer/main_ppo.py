@@ -26,7 +26,7 @@ from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
-from verl.trainer.ppo.utils import need_critic, need_reference_policy
+from verl.trainer.ppo.utils import need_critic, need_reference_policy, need_teacher_pool
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import deprecated
@@ -176,7 +176,7 @@ class TaskRunner:
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
         distillation_config = config.get("distillation")
-        if is_distillation_enabled(distillation_config):
+        if is_distillation_enabled(distillation_config) and need_teacher_pool(config):
             if distillation_config.n_gpus_per_node <= 0:
                 raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
             if distillation_config.nnodes <= 0:
@@ -206,7 +206,7 @@ class TaskRunner:
         """Add teacher model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if is_distillation_enabled(config.get("distillation")):
+        if is_distillation_enabled(config.get("distillation")) and need_teacher_pool(config):
             # we do not use teacher model workers, so we only register teacher model in resource pool
             # without registering a teacher model worker in role-worker mapping
             self.mapping[Role.TeacherModel] = "teacher_pool"

@@ -379,7 +379,14 @@ def compute_distillation_loss_reverse_kl_estimator(
     - distillation_metrics: Dictionary of metrics.
     """
     student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
-    teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
+    # The vLLM teacher (distillation.mode="vllm") produces log probs per sample during rollout as
+    # a jagged tensor over prompt+response; the in-process HF teacher produces one plain
+    # (bsz, resp_len) tensor per step, already sliced to the response exactly like ref_log_prob.
+    # Discriminating on the layout rather than on a mode flag keeps this shape-polymorphic, and
+    # the assert below validates both.
+    teacher_log_probs = data["teacher_logprobs"]
+    if teacher_log_probs.is_nested:
+        teacher_log_probs = no_padding_2_padding(teacher_log_probs, data).squeeze(-1)
     if data["response_mask"].is_nested:
         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
     else:
