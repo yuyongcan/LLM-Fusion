@@ -134,3 +134,23 @@ outputs
 
 # pre-release smoke testing scratch (not part of the release)
 test_before_open/
+
+# 本地复现产物（2026-09-11）：
+# verl 的 TENSORBOARD_DIR 传不到 Ray actor，指标会落在这个默认相对路径上；
+# swanlog 是 swanlab 的本地缓存。都不该进仓库。
+tensorboard_log/
+swanlog/
+# 镜像 tar：.gitignore 原本只有 *.tar.gz，不含 *.tar，
+# 而 SandboxFusion 的备份是 27G 的 .tar，极易被 git add -A 误提交。
+*.tar
+
+# 大体积本地产物（2026-09-18）：都在仓库根目录下，且 origin 指向上游作者的
+# fork，一次 git add -A 就会把它们推给别人。checkpoints/ 和 outputs/ 本来就在
+# 上面被忽略了，这三个不是 —— 补上。
+# 注意 .gitignore 不支持行尾注释，注释只能独占一行。
+# teacher_experts_fp32: fp32 导出的五个专家，229G
+teacher_experts_fp32/
+# research / research_hy4: 调研资料与论文 PDF，共 2.3G
+research/
+research_hy4/
+*.pdf

@@ -23,6 +23,13 @@ OUTPUT_ROOT=${OUTPUT_ROOT:-}
 # exports, one subdirectory per domain (math, science, code, if, agent).
 TEACHER_ROOT=${TEACHER_ROOT:-}
 
+# train_mopd_single_teacher.sh only: one HuggingFace model directory to distil
+# from, instead of TEACHER_ROOT's five. Typically a merged model produced by
+# merge/run_merge.sh. bf16 is fine and preferred -- vLLM loads bf16 regardless,
+# so fp32 only doubles disk and load time (unlike the merge itself, where fp32
+# is required because the task vectors are small).
+TEACHER_MODEL=${TEACHER_MODEL:-}
+
 # ---- training sets --------------------------------------------------------
 # A glob over each domain's parquet shards. Keep these quoted wherever they are
 # used, or the shell expands them into several words before verl sees them.

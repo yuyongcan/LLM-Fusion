@@ -252,6 +252,41 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
 
+    # GRPO group-wise reward statistics, grouped by `uid` (one group = one prompt
+    # sampled `rollout.n` times). These are core GRPO diagnostics: when the
+    # within-group variance collapses to 0 the group is all-correct or all-wrong,
+    # every sample gets the same advantage and the group contributes no gradient.
+    # Note: std/var use ddof=1 to match torch.std() in compute_grpo_outcome_advantage.
+    uid = batch.non_tensor_batch.get("uid", None)
+    if uid is not None:
+        try:
+            uid_arr = np.asarray(uid).reshape(-1)
+            rew_arr = sequence_reward.detach().cpu().float().numpy().reshape(-1)
+            if uid_arr.shape[0] == rew_arr.shape[0] and uid_arr.shape[0] > 0:
+                _, inv, counts = np.unique(uid_arr, return_inverse=True, return_counts=True)
+                inv = inv.reshape(-1)
+                n_groups = counts.shape[0]
+                sum_r = np.bincount(inv, weights=rew_arr, minlength=n_groups)
+                sum_r2 = np.bincount(inv, weights=rew_arr * rew_arr, minlength=n_groups)
+                mean_g = sum_r / counts
+                var_pop = np.maximum(sum_r2 / counts - mean_g**2, 0.0)
+                # unbiased (ddof=1) variance is undefined for singleton groups
+                multi = counts > 1
+                if multi.any():
+                    var_g = var_pop[multi] * counts[multi] / (counts[multi] - 1)
+                    std_g = np.sqrt(var_g)
+                    metrics["grpo/group_reward_var/mean"] = float(var_g.mean())
+                    metrics["grpo/group_reward_std/mean"] = float(std_g.mean())
+                    metrics["grpo/group_reward_std/median"] = float(np.median(std_g))
+                    metrics["grpo/group_reward_std/max"] = float(std_g.max())
+                    metrics["grpo/group_zero_var/frac"] = float(np.mean(var_g <= 1e-8))
+                metrics["grpo/group_reward_mean/mean"] = float(mean_g.mean())
+                metrics["grpo/group_reward_mean/std"] = float(mean_g.std())
+                metrics["grpo/group_size/mean"] = float(counts.mean())
+                metrics["grpo/num_groups"] = float(n_groups)
+        except Exception as e:  # diagnostics must never break training
+            logger.warning(f"failed to compute GRPO group reward variance metrics: {e}")
+
     # multi-turn conversation
     if "__num_turns__" in batch.non_tensor_batch:
         num_turns = batch.non_tensor_batch["__num_turns__"]
