@@ -90,6 +90,43 @@ distillation_loss:
   # formula wants whenever the student starts from the same base the teachers were built on.
   reward_extrapolation_lambda: 1.0
 
+  # ---- Representation distillation (OPRD, https://arxiv.org/abs/2606.06021) ----
+  #
+  # Output-space distillation reaches the student only through the LM head, a low-rank and
+  # softmax-shift-invariant projection: hidden-state differences in its effective null space
+  # produce no loss at all. Aligning hidden states directly removes that bottleneck, and the MSE
+  # is deterministic given the rollout, so it carries none of the sampling variance that stalls
+  # sampled-token OPD near convergence. Composes additively:
+  #
+  #   L = L_opd + rep_coef * L_rep
+  #
+  # Weight of the representation term. 0.0 (default) disables it and is bit-for-bit the
+  # behaviour from before this knob existed. Requires distillation.mode="in_process", since
+  # only the in-process HF teacher can return hidden states.
+  # ⚠️ The usable scale depends on rep_normalize below -- a normalized MSE is far smaller than
+  #    an unnormalized one, so a coefficient tuned for one is wrong for the other.
+  rep_coef: 0.0
+
+  # Which layers to align, indexed into HF hidden_states: 0 is the embedding output, k is the
+  # output of block k. Layer 0 is rejected (it distils the embedding table, not teacher
+  # computation). The default samples four points up a 36-layer stack rather than all of them:
+  # cost is linear in this list, and all 36 layers over a 2000-token suffix is ~350 MB/sample
+  # against ~39 MB for four.
+  rep_layers: [9, 18, 27, 36]
+
+  # Align only the final k response tokens. OPRD figure 8 measures where the models actually
+  # disagree: the first k tokens stay above 97% cosine similarity for every k, while the last k
+  # start at 91.65% and remain 4+ points lower, so the prefix carries little residual signal.
+  rep_last_k: 2000
+
+  # L2-normalize both hidden states before the MSE, making the loss scale-invariant and purely
+  # directional. true matches the reference implementation's shipped behaviour. false compares
+  # raw vectors, keeping magnitude information (hidden-state norms vary several-fold across
+  # positions) but tying the loss scale to the model's activation scale, which needs a much
+  # smaller rep_coef -- the OPRD authors note their own paper numbers used the unnormalized form
+  # with a coefficient 100-1000x larger.
+  rep_normalize: true
+
 
 # Number of GPUs per node in the distillation teacher resource pool
 n_gpus_per_node: 8

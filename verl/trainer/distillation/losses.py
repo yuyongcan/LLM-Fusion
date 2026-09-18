@@ -219,7 +219,78 @@ def distillation_ppo_loss(
     policy_loss += distill_loss * distillation_loss_coef
     policy_metrics["distillation/loss"] = Metric(value=distill_loss, aggregation=AggregationType.SUM)
 
+    # Representation distillation (OPRD), additive on top of whatever the output-space term is.
+    # Separate from distillation_loss() above because it does not read log probs at all: it
+    # compares hidden states, so it needs model_output's per-layer tensors rather than the
+    # teacher's log probs, and it is the one term whose gradient does not pass through the LM
+    # head. rep_coef == 0.0 skips it entirely rather than adding a multiplied-by-zero tensor.
+    if distillation_loss_config.rep_coef > 0.0:
+        rep_loss, rep_metrics = compute_representation_loss(distillation_loss_config, model_output, data)
+        policy_loss = policy_loss + rep_loss * distillation_loss_config.rep_coef
+        for name, value in rep_metrics.items():
+            policy_metrics[name] = Metric(value=value, aggregation=AggregationType.MEAN)
+
     return policy_loss, policy_metrics
+
+
+def compute_representation_loss(
+    loss_config,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Align the student's hidden states with the teacher's on the supervised suffix.
+
+    The student's layers arrive in ``model_output`` as jagged tensors over prompt+response (the
+    engine emits them next to log_probs); the teacher's arrive in ``data`` already sliced to the
+    last-k window by the trainer, which is what keeps this affordable -- the unrestricted tensor
+    is ~190 KB per token per layer.
+
+    Both sides are put through the same padding helper and the same gather, so the one-token
+    left shift and the per-sample window cannot drift between them.
+    """
+    from verl.trainer.distillation.representation import (
+        gather_last_k,
+        representation_distillation_loss,
+        teacher_hidden_key,
+    )
+    from verl.workers.utils.padding import no_padding_2_padding
+
+    layers = tuple(loss_config.rep_layers)
+    response_mask = data["response_mask"]
+    if response_mask.is_nested:
+        response_mask = response_mask.to_padded_tensor(0)
+
+    student_layers = []
+    teacher_layers = []
+    mask = None
+    for layer in layers:
+        student_key = f"rep_hidden_{layer}"
+        if student_key not in model_output:
+            raise ValueError(
+                f"representation distillation needs {student_key!r} from the student forward but "
+                "it is absent; check that rep_hidden_layers reached the engine."
+            )
+        teacher_key = teacher_hidden_key(layer)
+        if teacher_key not in data.keys():
+            raise ValueError(
+                f"representation distillation needs {teacher_key!r} in the batch but it is "
+                "absent; check that the in-process teacher was asked for this layer."
+            )
+
+        student_hidden = no_padding_2_padding(model_output[student_key], data)
+        student_gathered, mask = gather_last_k(student_hidden, response_mask, loss_config.rep_last_k)
+        student_layers.append(student_gathered)
+        teacher_layers.append(data[teacher_key])
+
+    student_stacked = torch.stack(student_layers, dim=1)
+    teacher_stacked = torch.stack(teacher_layers, dim=1).to(student_stacked.device)
+
+    return representation_distillation_loss(
+        student_stacked,
+        teacher_stacked,
+        mask,
+        normalize=loss_config.rep_normalize,
+    )
 
 
 def distillation_loss(

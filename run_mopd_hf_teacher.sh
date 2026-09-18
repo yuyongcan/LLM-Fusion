@@ -42,6 +42,24 @@ cd "${REPO}"
 
 export DISTILLATION_MODE=in_process
 
+# ---- Representation 蒸馏（OPRD）----
+# REP_COEF=0（默认）= 纯 logprob 蒸馏，也就是方案 B 的等价性验证配置。
+# 想开表示蒸馏就 REP_COEF=1 bash run_mopd_hf_teacher.sh
+#
+#   REP_COEF=1 bash run_mopd_hf_teacher.sh                  # 叠加表示项
+#   REP_COEF=1 REP_LAYERS='[18,36]' bash ...                # 少取两层，省显存/带宽
+#   REP_COEF=100 REP_NORMALIZE=False bash ...               # 不归一化（系数要大得多）
+#
+# ⚠️ rep_coef 的可用量级取决于 REP_NORMALIZE：归一化后的 MSE 比未归一化的小得多，
+#    为一种调好的系数用在另一种上必然是错的。OPRD 作者自己注明论文数字用的是
+#    **未归一化**形式配一个大 100~1000 倍的系数。
+# ⚠️ 传输量随 REP_LAYERS × REP_LAST_K 线性增长。4 层 × 2000 token ≈ 39 MB/样本，
+#    整步（1056 样本）约 40 GB 过 Ray。首次开启务必看 object store 有没有被打满。
+export REP_COEF=${REP_COEF:-0.0}
+export REP_LAYERS=${REP_LAYERS:-[9,18,27,36]}
+export REP_LAST_K=${REP_LAST_K:-2000}
+export REP_NORMALIZE=${REP_NORMALIZE:-True}
+
 # 教师池收掉，训练池吃下这 8 张卡。
 # NNODES_OVERRIDE 是基线脚本读的那个名字（它自己会 source env_llm_fusion.sh 之后
 # 写回 NNODES，见那边的注释）；TEACHER_POOL=0 让 WORLD_SIZE 回到 32 = 4×8。
@@ -75,7 +93,7 @@ echo "[check] distillation.mode 与 in-process teacher ..."
 # 免得门禁脚本里再复制一遍 fallback 逻辑。
 TEACHER_MODEL=${TEACHER_MODEL:-${B}/outputs_llm_fusion/merge_4b/merged_models/task_arithmetic_scaling_coefficient_1.0}
 export TEACHER_MODEL
-/opt/conda/envs/torch-base/bin/python - "${TEACHER_MODEL}" <<'PYEOF' || exit 1
+/opt/conda/envs/torch-base/bin/python - "${TEACHER_MODEL}" "${REP_COEF}" "${REP_LAYERS}" "${REP_LAST_K}" "${REP_NORMALIZE}" <<'PYEOF' || exit 1
 import os
 import sys
 
@@ -87,6 +105,7 @@ from verl.utils import omega_conf_to_dataclass
 from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig
 
 teacher_model = sys.argv[1]
+rep_coef, rep_layers, rep_last_k, rep_normalize = sys.argv[2:6]
 
 cfg_dir = os.path.abspath("verl/trainer/config")
 with initialize_config_dir(config_dir=cfg_dir, version_base=None):
@@ -101,6 +120,10 @@ with initialize_config_dir(config_dir=cfg_dir, version_base=None):
             "distillation.distillation_loss.loss_mode=k1",
             "distillation.distillation_loss.use_policy_gradient=True",
             "distillation.distillation_loss.use_task_rewards=False",
+            f"distillation.distillation_loss.rep_coef={rep_coef}",
+            f"distillation.distillation_loss.rep_layers={rep_layers}",
+            f"distillation.distillation_loss.rep_last_k={rep_last_k}",
+            f"distillation.distillation_loss.rep_normalize={rep_normalize}",
             "actor_rollout_ref.actor.use_kl_loss=False",
             "algorithm.use_kl_in_reward=False",
             # 教师的 inference 子树里 temperature 插值到学生的 rollout.temperature，
@@ -164,6 +187,21 @@ print("  teacher 池   : 不创建（need_teacher_pool=False）")
 print(f"  teacher 权重 : {teacher.model_path}")
 print(f"  loss_mode    : {parsed.distillation_loss.loss_mode}")
 print(f"  λ            : {parsed.distillation_loss.reward_extrapolation_lambda}  (1.0 = 不做外推)")
+
+loss_cfg = parsed.distillation_loss
+if loss_cfg.rep_coef > 0.0:
+    # 传输量随 层数 × last_k 线性增长，按 Qwen3-4B 的 d=2560、bf16 估。
+    n_layers, k = len(loss_cfg.rep_layers), loss_cfg.rep_last_k
+    mb_per_sample = n_layers * k * 2560 * 2 / 1024**2
+    print(f"  rep_coef     : {loss_cfg.rep_coef}   (0 = 纯 logprob 蒸馏)")
+    print(f"  rep_layers   : {list(loss_cfg.rep_layers)}")
+    print(f"  rep_last_k   : {k}")
+    print(f"  rep_normalize: {loss_cfg.rep_normalize}"
+          f"{'' if loss_cfg.rep_normalize else '   ← 未归一化，系数需大 100~1000 倍'}")
+    print(f"  → teacher hidden 传输量：约 {mb_per_sample:.0f} MB/样本"
+          f"，整步 1056 样本约 {mb_per_sample * 1056 / 1024:.0f} GB 过 Ray")
+else:
+    print("  rep_coef     : 0.0   (表示蒸馏关闭 —— 纯 logprob，方案 B 等价性验证配置)")
 PYEOF
 
 # ================== 交给基线启动器 ==================

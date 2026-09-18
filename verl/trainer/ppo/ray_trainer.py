@@ -1376,25 +1376,67 @@ class RayPPOTrainer:
         ref_log_prob, left-shifted by one by no_padding_2_padding exactly as the ref/actor paths
         are. The key is spelled the same in both modes; the loss discriminates on is_nested.
 
+        When representation distillation is on, the same forward also returns the requested
+        hidden-state layers, restricted to the supervised suffix. Restricting here rather than
+        in the loss is the point: the full tensor is ~190 KB/token/layer, so a 2000-token
+        suffix at four layers is ~39 MB per sample where the unrestricted version would be
+        ~3.7 GB.
+
         Placement matters: this must run after _balance_batch, which reorders rows, so that the
         log probs line up with the batch they were computed from.
         """
+        rep_layers = self._rep_hidden_layers()
+
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to nopadding
         batch_td = left_right_2_no_padding(batch_td)
         # step 3: add meta info
-        tu.assign_non_tensor(batch_td, **{"calculate_entropy": False, "compute_loss": False})
+        metadata = {"calculate_entropy": False, "compute_loss": False}
+        if rep_layers:
+            metadata["rep_hidden_layers"] = rep_layers
+        tu.assign_non_tensor(batch_td, **metadata)
         output = self.actor_rollout_wg.compute_teacher_log_prob(batch_td)
         # gather output
         log_probs = tu.get(output, "log_probs")
         # step 4. No padding to padding
         log_probs = no_padding_2_padding(log_probs, batch_td)
         # step 5: rebuild a tensordict and convert to dataproto
-        teacher_log_prob = tu.get_tensordict({"teacher_logprobs": log_probs.float()})
+        tensors = {"teacher_logprobs": log_probs.float()}
+
+        if rep_layers:
+            from verl.trainer.distillation.representation import gather_last_k
+
+            loss_config = self.config.distillation.distillation_loss
+            response_mask = batch.batch["response_mask"]
+            for layer in rep_layers:
+                # Each layer arrives jagged over prompt+response; pad it, keep the response
+                # segment, then gather each sample's own supervised suffix.
+                #
+                # no_padding_2_padding left-shifts by one, so slot t holds the state *before*
+                # predicting response token t (its last slot is the final prompt position, not
+                # the final response one). That is the quantity OPRD aligns -- the model's
+                # belief just before emitting each sampled token -- and more importantly it is
+                # the same convention the student's hidden states get, since both sides go
+                # through this one helper. The shift only has to be consistent, and routing
+                # both through here is what makes it so.
+                hidden = no_padding_2_padding(tu.get(output, f"rep_hidden_{layer}"), batch_td)
+                gathered, _ = gather_last_k(hidden, response_mask, loss_config.rep_last_k)
+                tensors[f"teacher_hidden_{layer}"] = gathered.float()
+
+        teacher_log_prob = tu.get_tensordict(tensors)
         teacher_log_prob = DataProto.from_tensordict(teacher_log_prob)
 
         return teacher_log_prob
+
+    def _rep_hidden_layers(self) -> tuple[int, ...]:
+        """Layers to supervise, or empty when representation distillation is off."""
+        if not self.in_process_teacher:
+            return ()
+        loss_config = self.config.distillation.distillation_loss
+        if loss_config.get("rep_coef", 0.0) <= 0.0:
+            return ()
+        return tuple(loss_config.rep_layers)
 
     def _compute_old_log_prob(self, batch: DataProto):
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
@@ -1459,6 +1501,9 @@ class RayPPOTrainer:
             batch_td,
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
+            # Ask the student's training forward for the same layers the teacher returned. Empty
+            # when representation distillation is off, so no hidden states are allocated.
+            rep_hidden_layers=self._rep_hidden_layers(),
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,

@@ -273,6 +273,14 @@ if [ "${DISTILLATION_MODE}" = "in_process" ]; then
     TEACHER_NNODES=0
 fi
 
+# Representation distillation (OPRD). REP_COEF=0 (default) leaves it off entirely; any
+# positive value requires DISTILLATION_MODE=in_process, since hidden states are only
+# available from the in-process teacher. REP_LAYERS is a hydra list literal.
+REP_COEF=${REP_COEF:-0.0}
+REP_LAYERS=${REP_LAYERS:-[9,18,27,36]}
+REP_LAST_K=${REP_LAST_K:-2000}
+REP_NORMALIZE=${REP_NORMALIZE:-True}
+
 DISTILL=(
     distillation.enabled=True
     distillation.mode=${DISTILLATION_MODE}
@@ -291,6 +299,10 @@ DISTILL=(
     distillation.distillation_loss.loss_max_clamp=10.0
     distillation.distillation_loss.log_prob_min_clamp=-10.0
     distillation.distillation_loss.reward_extrapolation_lambda=${REWARD_EXTRAPOLATION_LAMBDA}
+    distillation.distillation_loss.rep_coef=${REP_COEF}
+    distillation.distillation_loss.rep_layers=${REP_LAYERS}
+    distillation.distillation_loss.rep_last_k=${REP_LAST_K}
+    distillation.distillation_loss.rep_normalize=${REP_NORMALIZE}
 )
 
 python3 -m verl.trainer.main_ppo \

@@ -46,10 +46,60 @@ import torch
 import torch.nn.functional as F
 
 __all__ = [
+    "gather_last_k",
     "select_hidden_states",
     "build_last_k_mask",
     "representation_distillation_loss",
 ]
+
+
+def gather_last_k(
+    hidden: torch.Tensor,
+    response_mask: torch.Tensor,
+    last_k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather each sample's final ``k`` *valid* response positions.
+
+    The window is per sample, which is not the same as the last ``k`` columns of the batch:
+    ``response_mask`` is right-padded, so a sample whose response is shorter than the padded
+    width has padding in those trailing columns. A global tail slice would supervise that
+    padding, and for a response shorter than ``last_k`` it would supervise nothing at all while
+    still yielding a finite loss and a plausible cosine metric.
+
+    Args:
+        hidden: ``(bsz, response_len, hidden_size)``, already restricted to the response.
+        response_mask: ``(bsz, response_len)``, 1 for real tokens, right-padded.
+        last_k: how many trailing response tokens to keep per sample.
+
+    Returns:
+        ``(gathered, mask)`` of shapes ``(bsz, k, hidden_size)`` and ``(bsz, k)``, right-aligned
+        so each sample's final valid token lands in the last slot. ``k = min(last_k,
+        response_len)``.
+    """
+    bsz, response_len = response_mask.shape
+    if hidden.shape[:2] != (bsz, response_len):
+        raise ValueError(
+            f"hidden {tuple(hidden.shape)} does not match response_mask "
+            f"{tuple(response_mask.shape)} on (bsz, response_len)"
+        )
+    k = min(last_k, response_len)
+    positions, keep = _last_k_positions(response_mask, k)
+    index = positions.clamp(min=0, max=max(response_len - 1, 0))
+    index = index.unsqueeze(-1).expand(-1, -1, hidden.shape[-1])
+    return hidden.gather(dim=1, index=index), keep.float()
+
+
+def _last_k_positions(response_mask: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-sample response positions for the last-k window, and which slots are real.
+
+    Slot j holds response position ``valid_len - k + j``, so the final valid token always lands
+    in the last slot and samples with fewer than k tokens leave leading slots empty.
+    """
+    valid_lens = response_mask.long().sum(dim=1, keepdim=True)  # (bsz, 1)
+    offsets = torch.arange(k, device=response_mask.device).unsqueeze(0)  # (1, k)
+    positions = valid_lens - k + offsets  # (bsz, k)
+    keep = (positions >= 0) & (positions < valid_lens)
+    return positions, keep
 
 
 def select_hidden_states(
@@ -60,26 +110,16 @@ def select_hidden_states(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Slice the layers and response positions to be supervised.
 
-    The window is the last ``k`` tokens **of each sample's own response**, which is not the same
-    as the last ``k`` columns of the batch: ``response_mask`` is right-padded, so a sample whose
-    response is shorter than the padded width has padding in those trailing columns. A global
-    tail slice would supervise that padding, and for a response much shorter than ``last_k`` it
-    would supervise nothing at all while still reporting a finite loss. So positions are
-    gathered per sample, right-aligned within the returned window.
-
     Args:
         hidden_states: HF ``output_hidden_states`` tuple, ``num_layers + 1`` entries of
             ``(bsz, seq_len, hidden)``. Entry 0 is the embedding output.
         layers: which entries to keep. Validated at config time to exclude 0.
-        response_mask: ``(bsz, response_len)``, 1 for real response tokens. Assumed
-            right-padded, i.e. the valid tokens are a prefix -- the same assumption the rest of
-            this codebase's response handling makes.
+        response_mask: ``(bsz, response_len)``, 1 for real response tokens, right-padded.
         last_k: keep at most this many trailing response tokens per sample.
 
     Returns:
         ``(hidden, mask)`` where hidden is ``(bsz, n_layers, k, hidden_size)`` and mask is
-        ``(bsz, k)`` marking which of those slots hold real tokens. ``k = min(last_k,
-        response_len)``.
+        ``(bsz, k)``. See :func:`gather_last_k` for why the window is per sample.
     """
     if not layers:
         raise ValueError("layers must be non-empty")
@@ -91,37 +131,26 @@ def select_hidden_states(
                 f"entries (valid: 1..{num_entries - 1}, where 0 is the embedding output)"
             )
 
-    bsz, response_len = response_mask.shape
-    k = min(last_k, response_len)
-
-    # (bsz, n_layers, response_len, hidden): the response is the tail of the sequence.
-    stacked = torch.stack([hidden_states[layer][:, -response_len:, :] for layer in layers], dim=1)
-
-    valid_lens = response_mask.long().sum(dim=1, keepdim=True)  # (bsz, 1)
-    # Slot j holds response position valid_len - k + j, so the last valid token always lands in
-    # the final slot. Samples with fewer than k valid tokens leave the leading slots empty.
-    offsets = torch.arange(k, device=response_mask.device).unsqueeze(0)  # (1, k)
-    positions = valid_lens - k + offsets  # (bsz, k)
-    keep = (positions >= 0) & (positions < valid_lens)
-    gather_positions = positions.clamp(min=0, max=max(response_len - 1, 0))
-
-    index = gather_positions.view(bsz, 1, k, 1).expand(-1, stacked.shape[1], -1, stacked.shape[3])
-    selected = stacked.gather(dim=2, index=index)
-    return selected, keep.float()
+    response_len = response_mask.shape[1]
+    gathered = []
+    mask = None
+    for layer in layers:
+        # The response is the tail of the sequence.
+        response_hidden = hidden_states[layer][:, -response_len:, :]
+        layer_hidden, mask = gather_last_k(response_hidden, response_mask, last_k)
+        gathered.append(layer_hidden)
+    return torch.stack(gathered, dim=1), mask
 
 
 def build_last_k_mask(response_mask: torch.Tensor, last_k: int) -> torch.Tensor:
     """Mask marking which of the ``k`` gathered slots hold real tokens.
 
-    Returns the same mask :func:`select_hidden_states` produces, for callers that need it
-    without re-gathering (the student and teacher share one mask).
+    Returns the same mask :func:`gather_last_k` produces, for callers that need it without
+    re-gathering (student and teacher must share one mask).
     """
-    bsz, response_len = response_mask.shape
-    k = min(last_k, response_len)
-    valid_lens = response_mask.long().sum(dim=1, keepdim=True)
-    offsets = torch.arange(k, device=response_mask.device).unsqueeze(0)
-    positions = valid_lens - k + offsets
-    return ((positions >= 0) & (positions < valid_lens)).float()
+    k = min(last_k, response_mask.shape[1])
+    _, keep = _last_k_positions(response_mask, k)
+    return keep.float()
 
 
 def representation_distillation_loss(

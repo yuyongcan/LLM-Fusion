@@ -1075,6 +1075,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
             data=micro_batch, key="calculate_sum_pi_squared", default=False
         )
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+        # Representation distillation: which hidden-state layers to return, if any. Empty means
+        # the model was not asked for hidden states and output.hidden_states will be absent.
+        rep_layers = tu.get_non_tensor_data(data=micro_batch, key="rep_hidden_layers", default=())
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1250,6 +1253,49 @@ class FSDPEngineWithLMHead(FSDPEngine):
         if calculate_sum_pi_squared:
             model_output["sum_pi_squared"] = sum_pi_squared
 
+        if rep_layers:
+            # Representation distillation needs the selected layers as jagged per-sample
+            # tensors, matching how log_probs travel. Under remove_padding the model was fed a
+            # single packed (1, total_nnz) row, so hidden states come back packed the same way
+            # and the sequence boundaries are input_ids' offsets.
+            hidden_states = getattr(output, "hidden_states", None)
+            if hidden_states is None:
+                raise ValueError(
+                    "rep_hidden_layers was set but the model returned no hidden_states; "
+                    "output_hidden_states must be passed to the forward call."
+                )
+            cu_seqlens = input_ids.offsets()
+            for layer in rep_layers:
+                if not 0 <= layer < len(hidden_states):
+                    raise ValueError(
+                        f"rep_hidden_layers requested layer {layer}, but the model returned "
+                        f"{len(hidden_states)} entries (valid: 0..{len(hidden_states) - 1})"
+                    )
+                layer_hidden = hidden_states[layer]
+                if use_remove_padding:
+                    layer_hidden = layer_hidden.squeeze(0)  # (total_nnz, hidden)
+                    if self.use_ulysses_sp:
+                        # Each rank holds a slice of the packed sequence; gather before the
+                        # offsets below can index it.
+                        layer_hidden = gather_outputs_and_unpad(
+                            layer_hidden,
+                            gather_dim=0,
+                            unpad_dim=0,
+                            padding_size=output_args["pad_size"],
+                        )
+                    model_output[f"rep_hidden_{layer}"] = torch.nested.nested_tensor_from_jagged(
+                        layer_hidden, cu_seqlens
+                    )
+                else:
+                    seq_lengths = cu_seqlens.diff()
+                    starts = torch.zeros_like(seq_lengths, dtype=torch.int64)
+                    narrowed = torch.nested.narrow(
+                        layer_hidden, 1, starts, seq_lengths, layout=torch.jagged
+                    )
+                    model_output[f"rep_hidden_{layer}"] = torch.nested.nested_tensor_from_jagged(
+                        torch.cat([t for t in narrowed.unbind()]), cu_seqlens
+                    )
+
         return model_output
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
@@ -1269,9 +1315,15 @@ class FSDPEngineWithLMHead(FSDPEngine):
             else torch.autocast(device_type=device_name, dtype=autocast_dtype)
         )
         with autocast_ctx:
+            # Only ask for hidden states when a consumer wants them: they are ~190 KB/token for
+            # all layers of a 4B model, so requesting them unconditionally would be a large
+            # allocation with no reader.
+            rep_layers = tu.get_non_tensor_data(data=micro_batch, key="rep_hidden_layers", default=())
+            forward_kwargs = {"output_hidden_states": True} if rep_layers else {}
             raw_output = self.module(
                 **model_inputs,
                 use_cache=False,
+                **forward_kwargs,
             )  # prevent model thinks we are generating
 
             model_output = self.prepare_model_outputs(
