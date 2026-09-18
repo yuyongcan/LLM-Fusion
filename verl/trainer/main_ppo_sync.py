@@ -82,7 +82,14 @@ from verl.trainer.ppo.metric_utils import (
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_teacher_policy
+from verl.trainer.ppo.utils import (
+    Role,
+    WorkerType,
+    need_critic,
+    need_in_process_teacher,
+    need_reference_policy,
+    need_teacher_policy,
+)
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -1804,6 +1811,16 @@ class TaskRunner:
 
         distillation_config = config.get("distillation")
         if is_distillation_enabled(distillation_config):
+            if need_in_process_teacher(config):
+                # The in-process teacher is only wired into main_ppo.py's trainer (it fuses the
+                # teacher into ActorRolloutRefWorker and drives one forward per step from
+                # RayPPOTrainer.fit). Refusing here is deliberate: this path would otherwise
+                # build a teacher pool and no in-process teacher, so teacher_logprobs would
+                # never enter the batch and the run would fail deep inside the loss instead.
+                raise NotImplementedError(
+                    "distillation.mode='in_process' is not supported by this entrypoint "
+                    "(main_ppo_sync). Use verl.trainer.main_ppo, or set distillation.mode='vllm'."
+                )
             if distillation_config.n_gpus_per_node <= 0:
                 raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
             if distillation_config.nnodes <= 0:

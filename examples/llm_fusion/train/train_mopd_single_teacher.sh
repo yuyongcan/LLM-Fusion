@@ -257,8 +257,25 @@ REWARD=(
 #
 # `num_replicas` is deliberately not set either: it is derived as
 # pool_size / (tp*dp*pp) = 8 / 1 = 8.
+#
+# DISTILLATION_MODE selects where the teacher runs:
+#
+#   vllm        (default) teacher served from its own pool, log probs per sample during
+#               rollout. The inference.* keys below configure that engine.
+#   in_process  teacher is a frozen HF model inside ActorRolloutRefWorker, one batched
+#               forward per step. It claims no pool, so nnodes/n_gpus_per_node must be 0
+#               (the config rejects a nonzero pool outright rather than stranding those
+#               GPUs) and the inference.* keys are inert -- no engine is built from them.
+#               Give the freed GPUs to the training pool via NNODES instead.
+DISTILLATION_MODE=${DISTILLATION_MODE:-vllm}
+if [ "${DISTILLATION_MODE}" = "in_process" ]; then
+    TEACHER_WORLD_SIZE=0
+    TEACHER_NNODES=0
+fi
+
 DISTILL=(
     distillation.enabled=True
+    distillation.mode=${DISTILLATION_MODE}
     distillation.n_gpus_per_node=${TEACHER_WORLD_SIZE}
     distillation.nnodes=${TEACHER_NNODES}
     distillation.teacher_models.teacher_model.model_path=${TEACHER_MODEL}
