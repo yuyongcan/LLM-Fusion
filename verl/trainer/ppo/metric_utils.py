@@ -287,6 +287,34 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         except Exception as e:  # diagnostics must never break training
             logger.warning(f"failed to compute GRPO group reward variance metrics: {e}")
 
+    # Per-domain reward, grouped by `data_source`. In mixed-domain training (the
+    # `Mix` config) one batch blends Math/Science/Code/IF/Agent, so the aggregate
+    # `critic/score/mean` hides which domain is actually moving -- and which one is
+    # collapsing. Scores are compared across domains only loosely: each domain has
+    # its own verifier, so the levels are not on a common scale, but the *trend*
+    # per domain is what matters.
+    #
+    # Aborted samples are excluded, matching `critic/score/mean` above.
+    data_source = batch.non_tensor_batch.get("data_source", None)
+    if data_source is not None:
+        try:
+            ds_arr = np.asarray(data_source).reshape(-1)
+            keep = non_aborted_mask.detach().cpu().numpy().reshape(-1)
+            score_arr = sequence_score.detach().cpu().float().numpy().reshape(-1)
+            if ds_arr.shape[0] == score_arr.shape[0] and ds_arr.shape[0] == keep.shape[0]:
+                for ds in np.unique(ds_arr):
+                    sel = (ds_arr == ds) & keep
+                    if not sel.any():
+                        continue
+                    # "LLM-Fusion/Math" -> "math", so the key reads
+                    # `critic/score_by_domain/math/mean`.
+                    name = str(ds).rsplit("/", 1)[-1].lower()
+                    vals = score_arr[sel]
+                    metrics[f"critic/score_by_domain/{name}/mean"] = float(vals.mean())
+                    metrics[f"critic/score_by_domain/{name}/count"] = float(sel.sum())
+        except Exception as e:  # diagnostics must never break training
+            logger.warning(f"failed to compute per-domain reward metrics: {e}")
+
     # multi-turn conversation
     if "__num_turns__" in batch.non_tensor_batch:
         num_turns = batch.non_tensor_batch["__num_turns__"]
