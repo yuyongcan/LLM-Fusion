@@ -55,6 +55,16 @@ def parse_args():
         help="Whether to use CPU initialization for the model. This is useful for large models that cannot "
         "fit into GPU memory during initialization.",
     )
+    base_op_parser.add_argument(
+        "--save_dtype",
+        type=str,
+        default="float32",
+        choices=["float32", "bfloat16", "float16"],
+        help="dtype of the exported weights. Defaults to float32 to keep the FSDP master weights intact: "
+        "task vectors (theta - theta_base) are small enough that most of their entries fall below one "
+        "bfloat16 rounding unit, so exporting in bfloat16 silently destroys task-vector arithmetic "
+        "(scaling, merging, projection) done downstream on the export.",
+    )
 
     merge_parser = subparsers.add_parser("merge", parents=[base_op_parser], help="Merge model checkpoints and save.")
     merge_parser.add_argument(
@@ -98,6 +108,8 @@ class ModelMergerConfig:
         hf_model_config_path (Optional[str]): Path to HuggingFace model configuration files. Defaults to None.
         hf_upload (bool): Whether to upload to HuggingFace (computed automatically). Not for initialization.
         use_cpu_initialization (bool): Whether to use CPU initialization for large models. Defaults to False.
+        save_dtype (str): dtype of the exported weights. Defaults to "float32"; see --save_dtype in parse_args
+            for why bfloat16 is a poor default for checkpoints that feed task-vector arithmetic.
     """
 
     operation: str  # 'merge' or 'test'
@@ -113,6 +125,11 @@ class ModelMergerConfig:
     hf_model_config_path: Optional[str] = None
     hf_upload: bool = field(init=False)
     use_cpu_initialization: bool = False
+    save_dtype: str = "float32"
+
+    @property
+    def torch_save_dtype(self) -> torch.dtype:
+        return getattr(torch, self.save_dtype)
 
     def __post_init__(self):
         self.hf_upload = self.operation == "merge" and bool(self.hf_upload_path)
@@ -147,6 +164,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
         "local_dir": args.local_dir,
         "hf_model_config_path": _default_hf_model_config_path(args.backend, args.local_dir),
         "use_cpu_initialization": args.use_cpu_initialization,
+        "save_dtype": args.save_dtype,
     }
 
     if args.operation == "merge":
@@ -391,10 +409,14 @@ class BaseModelMerger(ABC):
         auto_model_class = self.get_transformers_auto_model_class()
         with init_empty_weights():
             model = auto_model_class.from_config(
-                self.model_config, torch_dtype=torch.bfloat16, trust_remote_code=self.config.trust_remote_code
+                self.model_config,
+                torch_dtype=self.config.torch_save_dtype,
+                trust_remote_code=self.config.trust_remote_code,
             )
         model.to_empty(device="cpu")
         model = self.patch_model_generation_config(model)
+        # Keep the config metadata consistent with the weights actually written.
+        model.config.torch_dtype = self.config.save_dtype
 
         lora_path = self.save_lora_adapter(state_dict)
         if lora_path:

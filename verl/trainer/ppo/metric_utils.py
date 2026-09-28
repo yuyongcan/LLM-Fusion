@@ -284,6 +284,47 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
                 metrics["grpo/group_reward_mean/std"] = float(mean_g.std())
                 metrics["grpo/group_size/mean"] = float(counts.mean())
                 metrics["grpo/num_groups"] = float(n_groups)
+
+                # Same group statistics split by domain. In mixed-domain training the
+                # aggregate numbers above average over domains whose reward densities
+                # differ by 4x, hiding the quantity that actually drives per-domain
+                # learning: a domain's share of *gradient-carrying* groups, which is
+                # its non-degenerate group count weighted by within-group spread.
+                #
+                # `group_zero_var/frac` alone is two-sided and cannot be read on its
+                # own -- it is high both for a domain that has not started (groups
+                # uniformly score 0) and one that is finished (groups uniformly score
+                # full marks). The all_wrong / all_right split below separates those.
+                # With partial-credit verifiers "all_right" means uniformly nonzero,
+                # not necessarily perfect.
+                ds_for_groups = batch.non_tensor_batch.get("data_source", None)
+                if ds_for_groups is not None and multi.any():
+                    ds_arr = np.asarray(ds_for_groups).reshape(-1)
+                    if ds_arr.shape[0] == uid_arr.shape[0]:
+                        # every sample in a group shares a prompt, hence a domain:
+                        # take whichever sample lands first for each group
+                        group_ds = np.empty(n_groups, dtype=ds_arr.dtype)
+                        group_ds[inv[::-1]] = ds_arr[::-1]
+                        var_multi = var_pop[multi] * counts[multi] / (counts[multi] - 1)
+                        std_multi = np.sqrt(var_multi)
+                        mean_multi = mean_g[multi]
+                        ds_multi = group_ds[multi]
+                        degenerate = var_multi <= 1e-8
+                        for ds in np.unique(ds_multi):
+                            sel = ds_multi == ds
+                            if not sel.any():
+                                continue
+                            name = str(ds).rsplit("/", 1)[-1].lower()
+                            n_sel = int(sel.sum())
+                            deg = degenerate & sel
+                            key = f"grpo/group_by_domain/{name}"
+                            metrics[f"{key}/reward_std_mean"] = float(std_multi[sel].mean())
+                            metrics[f"{key}/zero_var_frac"] = float(deg.sum() / n_sel)
+                            metrics[f"{key}/all_wrong_frac"] = float((deg & (mean_multi <= 1e-8)).sum() / n_sel)
+                            metrics[f"{key}/all_right_frac"] = float((deg & (mean_multi > 1e-8)).sum() / n_sel)
+                            metrics[f"{key}/num_groups"] = float(n_sel)
+                            # groups that actually contribute gradient this step
+                            metrics[f"{key}/effective_groups"] = float(n_sel - int(deg.sum()))
         except Exception as e:  # diagnostics must never break training
             logger.warning(f"failed to compute GRPO group reward variance metrics: {e}")
 

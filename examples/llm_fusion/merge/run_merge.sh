@@ -55,8 +55,13 @@ SCALING=${SCALING:-1.0}
 # expectation and DARE-TA at a given lambda is the same expected step as TA.
 WEIGHT_MASK_RATE=${WEIGHT_MASK_RATE:-0.2}
 # The merge is always computed in fp32; this is the on-disk dtype of the result.
-# bf16 halves the files and is lossless for vLLM eval, which casts to bf16.
-SAVE_DTYPE=${SAVE_DTYPE:-bfloat16}
+# fp32 rather than bf16: a merged checkpoint is often itself an input to further
+# task-vector arithmetic (rescaling, projection, a second merge, or serving as a
+# distillation teacher whose tau gets measured). Most entries of tau = theta -
+# theta_base are smaller than one bf16 rounding unit at these weight magnitudes,
+# so a bf16 round-trip silently loses most of the update. bf16 is fine when the
+# checkpoint is only ever evaluated -- set SAVE_DTYPE=bfloat16 to halve the files.
+SAVE_DTYPE=${SAVE_DTYPE:-float32}
 # Average, TIES, DARE-TA, SCE, i.e. everything except plain TA.
 RUN_ALL_METHODS=${RUN_ALL_METHODS:-0}
 

@@ -8,6 +8,7 @@
 #   bash run_eval_experts.sh                    # 全部 6 个
 #   MODELS="math" bash run_eval_experts.sh      # 只跑一个（试水）
 #   VAL_N=4 bash run_eval_experts.sh            # 降采样
+#   MODELS="/path/to/hf_model" bash run_eval_experts.sh   # 直接指到任意 HF 目录
 #
 # 断点续跑：已有 summary 的模型自动跳过，重跑删掉对应 eval/<name> 目录即可。
 
@@ -52,12 +53,18 @@ echo "sandbox OK"
 for d in ${MODELS}; do
     if [ "$d" = "base" ]; then
         MP="${BASE}"; NAME="base_qwen3_4b_inst2507"
+    elif [ "${d#/}" != "${d}" ]; then
+        # 绝对路径：直接当 HF 模型目录用（MOPD 训练产物需先 model_merger 导出）
+        MP="${d%/}"; NAME="$(basename "${MP}")"
     else
         MP="${EXPERTS}/${d}"; NAME="expert_${d}_fp32"
     fi
-    EXP="eval_${NAME}_n${VAL_N}"
+    # 非默认推理精度另开目录，bfloat16 保持原路径不变（已有结果不受影响）
+    SUFFIX=""
+    [ "${ROLLOUT_DTYPE:-bfloat16}" != "bfloat16" ] && SUFFIX="_${ROLLOUT_DTYPE}"
+    EXP="eval_${NAME}_n${VAL_N}${SUFFIX}"
     # 结果直接落在模型自己的目录下，跟权重放一起，免得对不上号
-    OUT="${MP}/eval_n${VAL_N}"
+    OUT="${MP}/eval_n${VAL_N}${SUFFIX}"
 
     if [ ! -f "${MP}/config.json" ]; then
         echo "!! ${d}: ${MP} 无 config.json，跳过" >&2; continue

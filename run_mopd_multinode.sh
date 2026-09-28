@@ -90,6 +90,21 @@ export PROJECT_NAME=${PROJECT_NAME:-llm_fusion_repro}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-mopd_5teacher_qwen3_4b_${NNODES}x${NGPUS_PER_NODE}+${TEACHER_POOL}t}
 CKPT_CONTENTS=${CKPT_CONTENTS:-'["model"]'}
 
+# ---- 梯度裁剪 ----
+# optim/fsdp.yaml 的默认值是 0.2，那是按**域 RL** 的量级定的（grad_norm 中位数
+# 0.02 / p90 0.05），为的是掐住 expert_math_qwen3_4b_4x8 那次长度爆炸式崩溃
+# （step 255~259 grad_norm 冲到 0.37~0.81，随后熵塌陷、98% rollout 退化成重复
+# 循环顶满 max_response_length 拿 0 分）。
+#
+# 但蒸馏的梯度量级本来就高一个数量级：五教师 MOPD 实测中位数 0.094、p90 0.303、
+# max 7.55；ExOPD（λ=1.25）中位数 0.110、p90 0.615。两者都跑满 400 步没崩 ——
+# 那些大 norm 是这条路径的常态，不是异常。套用 0.2 会裁掉大半正常步，
+# 静默改变已验证过的 MOPD 结果。
+#
+# 所以这里钉回 1.0（= 改默认值之前的行为），让 MOPD 与历史作业保持可比。
+# 想试更紧的裁剪：CLIP_GRAD=0.5 bash run_mopd_multinode.sh
+CLIP_GRAD=${CLIP_GRAD:-1.0}
+
 LOG_DIR=${B}/logs/llm_fusion
 mkdir -p "${LOG_DIR}"
 LOG=${LOG_DIR}/train_mopd_${NNODES}x${NGPUS_PER_NODE}_$(date +%Y%m%d_%H%M%S).log
@@ -146,6 +161,7 @@ cat <<EOF
   合计       : ${WORLD_SIZE} / ${TOTAL_GPU}  （教师节点 3 卡空转，设计如此）
   节点       : ${NODE_IPS[*]}   (head=${HEAD_IP})
   教师       : ${TEACHER_ROOT}  (bf16)
+  clip_grad  : ${CLIP_GRAD}   (optim/fsdp.yaml 默认 0.2 是按域 RL 定的，蒸馏梯度高一档)
   实验名     : ${EXPERIMENT_NAME}
   项目名     : ${PROJECT_NAME}
   logger     : ${LOGGER}   (原脚本是 wandb，本 Pod 无凭据，已换)
@@ -159,6 +175,7 @@ EOF
 setsid nohup bash examples/llm_fusion/train/train_mopd.sh \
     "trainer.logger=${LOGGER}" \
     "actor_rollout_ref.actor.checkpoint.save_contents=${CKPT_CONTENTS}" \
+    "actor_rollout_ref.actor.optim.clip_grad=${CLIP_GRAD}" \
     "$@" \
     > "${LOG}" 2>&1 < /dev/null & disown
 

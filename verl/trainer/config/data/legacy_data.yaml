@@ -35,8 +35,10 @@ reward_fn_key: data_source
 max_prompt_length: 512
 
 # Maximum response length. Rollout in RL algorithms (e.g. PPO) generates up to this length.
+# 24576 leaves room for the long chains of thought the reasoning-heavy domains
+# produce; shorter caps truncate them mid-answer, which scores as a failure.
 # oc.select: default val for rollout.response_length
-max_response_length: 512
+max_response_length: 24576
 
 # Batch size sampled for one training iteration of different RL algorithms.
 train_batch_size: 1024
@@ -49,6 +51,12 @@ tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_p
 
 # for @function_tool entries
 function_tool_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.function_tool_path, null}
+
+# Agent loop for rows with no `agent_name` column. Length filtering needs it to
+# know whether a row's prompt will carry tool schemas at all: single_turn_agent
+# passes none, so counting the full tool config against such rows would reject
+# every one of them.
+default_agent_loop: ${oc.select:actor_rollout_ref.rollout.agent.default_agent_loop, single_turn_agent}
 
 # Whether to return the original input_ids without adding chat template.
 # This is used when the reward model's chat template differs from the policy.

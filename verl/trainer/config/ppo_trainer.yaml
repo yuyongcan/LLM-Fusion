@@ -109,6 +109,34 @@ algorithm:
     # Power used for weight scaling in "pow" method
     weight_pow: 2.0
 
+  # DAPO dynamic sampling: drop prompt groups whose rollouts all score the same.
+  # GRPO normalizes the advantage within a group, so a group where every one of
+  # `rollout.n` samples earns the same reward contributes exactly zero gradient --
+  # while still paying for a full rollout. Measured here: 39% of groups on the math
+  # expert, 63% on the MOPD-initialized mix run (`reward_std/median` is already 0.0).
+  #
+  # When enabled, such groups are discarded and another gen batch is drawn until
+  # `data.train_batch_size` groups survive, so every step trains on a full batch of
+  # samples that actually carry signal. Set `data.gen_batch_size` to roughly
+  # train_batch_size / keep_ratio to keep that to a single extra rollout.
+  filter_groups:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.FilterGroupsConfig
+
+    # Whether to drop zero-variance groups and resample. Off keeps the batch exactly
+    # as generated, which is the behaviour every existing result was produced with.
+    enable: False
+
+    # Per-sample scalar to group by: "acc", "score", or null to sum the token-level
+    # `rm_scores`. Only affects which number is compared, never the grouping.
+    metric: null
+
+    # Give up after this many gen batches for a single step. Non-positive means no
+    # limit; exceeding it raises rather than training on a short batch, because a
+    # partial batch trips an unrelated-looking divisibility assert much further down.
+    max_num_gen_batches: 0
+
 # config for the trainer
 trainer:
 

@@ -69,11 +69,21 @@ TEACHER_WORLD_SIZE=${TEACHER_WORLD_SIZE:-$(( NUM_TEACHERS * TEACHER_NUM_REPLICAS
 # 264 = 24 x 11, divisible by the 3 x 8 training pool's data-parallel size.
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-264}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-264}
+# 5120 covers 100% of the training data and 100% of the eval suite; the measured
+# per-domain distribution, and why a lower value empties the Agent domain, are
+# documented in train_mix_rl.sh. `truncation='error'` aborts on an overlong prompt
+# rather than cutting it, so filter_overlong_prompts below drops the handful of
+# outliers at load time instead. Note this also sets the teacher's inference
+# prompt_length further down, so both sides stay aligned.
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-5120}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-24576}
 MAX_NUM_TOKENS=${MAX_NUM_TOKENS:-$(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 1 ))}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 NORM_ADV_BY_STD_IN_GRPO=${NORM_ADV_BY_STD_IN_GRPO:-FALSE}
+# Pool every token in the batch into one mean, so each token weighs the same
+# regardless of which rollout produced it; see the note in train_mix_rl.sh. This
+# also governs the distillation KL term, which shares the same aggregation.
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
 
 # ---- rollout ----
 ROLLOUT_TP=${ROLLOUT_TP:-1}
@@ -92,7 +102,7 @@ USE_POLICY_GRADIENT=${USE_POLICY_GRADIENT:-True}
 USE_TASK_REWARDS=${USE_TASK_REWARDS:-False}
 
 # ---- bookkeeping ----
-PROJECT_NAME=${PROJECT_NAME:-llm_fusion}
+PROJECT_NAME=${PROJECT_NAME:-llm_fusion_repro}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-mopd_5teacher_qwen3_4b}
 SAVE_FREQ=${SAVE_FREQ:-25}
 TEST_FREQ=${TEST_FREQ:-25}
@@ -113,7 +123,7 @@ DATA=(
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.shuffle=True
-    data.filter_overlong_prompts=False
+    data.filter_overlong_prompts=True
     data.truncation='error'
     data.return_raw_chat=True
     data.reward_fn_key=data_source
@@ -133,6 +143,7 @@ ACTOR=(
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.use_kl_loss=False
+    actor_rollout_ref.actor.loss_agg_mode=${LOSS_AGG_MODE}
 )
 
 ROLLOUT=(

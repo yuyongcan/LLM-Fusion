@@ -111,6 +111,14 @@ export SWANLAB_MODE="${SWANLAB_MODE:-cloud}"
 #    真正生效的那份由 setup_ray_cluster.sh 在 ray start 时注入（见 §5 白名单问题）。
 export SWANLAB_LOG_DIR="${SWANLAB_LOG_DIR:-/tmp/swanlog_llm_fusion}"
 mkdir -p "${SWANLAB_LOG_DIR}"
+# ⚠️ SWANLAB_SAVE_DIR 是另一条，且更早生效（2026-09-22 实测）：它决定 `.netrc` 等
+#    全局文件的位置，在 **import swanlab** 时就被读（env.py:183 set_default ->
+#    get_save_dir），而 get_save_dir 只创建末级目录、不创建父目录 —— 父目录不存在
+#    就抛 `FileNotFoundError: <父目录> not found`，连 import 都过不了。
+#    本 Pod 注入的值指向一个不存在的 <instance> 目录，于是下面的门禁会误报
+#    「没装 swanlab」。用 ${VAR:-} 不行（Pod 的值会赢），必须无条件覆盖。
+export SWANLAB_SAVE_DIR=/tmp/swanlab_llm_fusion
+mkdir -p "${SWANLAB_SAVE_DIR}"
 
 # tensorboard 留作本地兜底（swanlab 挂了也还有指标）。
 # ⚠️ TENSORBOARD_DIR 同样传不到 Ray actor，实际会落在 <repo>/tensorboard_log/，
@@ -121,14 +129,18 @@ LOGGER=${LOGGER:-'["console","swanlab","tensorboard"]'}
 export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128}
 export PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-128}
 export ROLLOUT_N=${ROLLOUT_N:-16}
-export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-5120}
-export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+# ⚠️ MAX_PROMPT_LENGTH 故意不在这里给默认值（2026-09-22）。
+#    这里 export 一个值，会盖掉 train_*.sh 里 ${MAX_PROMPT_LENGTH:-N} 的默认 ——
+#    `${VAR:-默认}` 的语义是「VAR 已设就用 VAR」，于是本文件的值永远赢，域脚本
+#    自己调的长度静默失效。各域数据的 prompt 分布不同（train_mix_rl.sh 按实测
+#    p99/max 定在 2048），该由域脚本决定；想临时覆盖就在启动 shell 里 export。
+export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-24576}
 export ACTOR_LR=${ACTOR_LR:-1e-6}
 export ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.9}
 export TOTAL_EPOCHS=${TOTAL_EPOCHS:-10}
 export SAVE_FREQ=${SAVE_FREQ:-25}
 export TEST_FREQ=${TEST_FREQ:-25}
-export PROJECT_NAME=${PROJECT_NAME:-llm_fusion}
+export PROJECT_NAME=${PROJECT_NAME:-llm_fusion_repro}
 CKPT_CONTENTS=${CKPT_CONTENTS:-'["model"]'}
 
 # ---- 每个域的差异 ----
@@ -213,12 +225,19 @@ if [ "${LOGGER}" != "${LOGGER/swanlab/}" ]; then
         if [ "${ip}" = "${HEAD_IP}" ]; then
             ok=$(python -c "import swanlab" 2>/dev/null && echo ok)
         else
+            # ssh 非交互不继承本 shell 的 export，SWANLAB_SAVE_DIR 要显式带上，
+            # 否则 worker 上读到 Pod 注入的坏路径、import 失败，判成没装。
             ok=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no "${ip}" \
-                "/opt/conda/envs/torch-base/bin/python -c 'import swanlab'" 2>/dev/null && echo ok)
+                "SWANLAB_SAVE_DIR=${SWANLAB_SAVE_DIR} \
+                 /opt/conda/envs/torch-base/bin/python -c 'import swanlab'" 2>/dev/null && echo ok)
         fi
         if [ "${ok}" != "ok" ]; then
-            echo "ERROR: ${ip} 上没有 swanlab。两个节点都要装（TaskRunner 可能落在任一节点）：" >&2
-            echo "       pip install swanlab" >&2
+            echo "ERROR: ${ip} 上 \`import swanlab\` 失败。两种原因，先分清再动手：" >&2
+            echo "  1) 真没装      -> pip install swanlab（每个节点都要，TaskRunner 可能落在任一节点）" >&2
+            echo "  2) 装了但 import 就炸 -> 多半是 SWANLAB_SAVE_DIR 指向不存在的父目录。" >&2
+            echo "     判据：SWANLAB_SAVE_DIR=/tmp/x python -c 'import swanlab' 能过，裸跑不能。" >&2
+            echo "     本脚本已无条件覆盖成 ${SWANLAB_SAVE_DIR}；若还失败，看完整 traceback：" >&2
+            echo "       ssh ${ip} '/opt/conda/envs/torch-base/bin/python -c \"import swanlab\"'" >&2
             exit 1
         fi
     done

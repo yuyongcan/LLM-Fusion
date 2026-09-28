@@ -40,6 +40,30 @@ IF_TRAIN=${IF_TRAIN:-${TRAIN_DATA_ROOT}/IF/train-*.parquet}
 AGENT_TRAIN=${AGENT_TRAIN:-${TRAIN_DATA_ROOT}/Agent/train-*.parquet}
 MIX_TRAIN=${MIX_TRAIN:-${TRAIN_DATA_ROOT}/Mix/train-*.parquet}
 
+# ---- SFT (phase 1: Base -> chat/reasoning model) --------------------------
+# Deliberately separate from MODEL_PATH. MODEL_PATH is the *policy* the RL stages
+# start from (the paper uses Qwen3-4B-Instruct-2507, already instruction-tuned);
+# SFT has to start from Qwen3-4B-*Base*. Sharing one variable would silently
+# fine-tune an already-instruct model and there would be nothing in the loss
+# curve to tell you.
+#
+# ⚠️ Patch the eos contract on this directory before training -- Qwen3-4B-Base
+# ships generation_config.eos_token_id = 151643 (<|endoftext|>) while its chat
+# template ends assistant turns with <|im_end|> (151645). verl copies the base
+# generation_config into every checkpoint verbatim, so without the patch each
+# saved model advertises a stop token it never emits and vLLM generates to the
+# token cap. run_sft_multinode.sh gates on this.
+SFT_BASE_MODEL=${SFT_BASE_MODEL:-}
+
+# Directory holding the SFT mixture parquet(s).
+SFT_DATA_ROOT=${SFT_DATA_ROOT:-}
+
+# The training file. Default is the mixture pre-filtered to <=16384 *training*
+# tokens by sft/filter_by_token_length.py -- not the raw train.parquet. Filtering
+# offline is what lets the run use truncation=error (a surviving overlong row then
+# means tokenizer/template/data drift, rather than being silently cut).
+SFT_TRAIN=${SFT_TRAIN:-${SFT_DATA_ROOT}/train.le16384.parquet}
+
 # ---- EVAL SETS: the eight benchmarks reported in the paper ----------------
 # Downloaded by download_data.py --target test. Override individually to point
 # at your own copies.

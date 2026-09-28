@@ -66,6 +66,48 @@
 | merge5_c1.2 | 51.67 | 60.21 | 63.76 | **53.33** | 89.16 | 67.47 | 63.53 | 71.47 | 65.08 | 55.94 | 63.76 | 65.50 |
 | **percoef_if1.2** | 55.00 | **63.12** | 64.68 | 52.25 | 89.44 | 68.17 | **65.38** | 72.56 | **66.33** | **59.06** | 64.68 | **66.77** |
 
+### 2.1 名义系数 vs 生效系数（bf16 推理下）
+
+λ 轴不是线性的。task vector 的范数只有 ‖θ_base‖ 的 0.1% 量级，大量分量落在
+bf16 的一个舍入单位以下，vLLM 加载时按 bf16 推理会把它们抹掉。下表是
+`‖RoundBf16(θ_base + λ·τ) − θ_base‖ / ‖τ‖`，即推理实际看到的放大量（全模型
+398 个张量，fp32 task vector）：
+
+| 名义 λ | merge5 生效 | 存活率 | mcs3 生效 | 存活率 |
+|---|---|---|---|---|
+| 0.4 | 0.2858 | **71.5%** | 0.2480 | **62.0%** |
+| 0.6 | 0.4979 | 83.0% | 0.4458 | 74.3% |
+| 0.8 | 0.7305 | 91.3% | 0.6588 | 82.4% |
+| 1.0 | 0.9663 | 96.6% | 0.8885 | 88.9% |
+| 1.2 | 1.1966 | 99.7% | 1.1255 | 93.8% |
+
+自洽校验：0.966 × ‖τ_merge5,fp32‖(2.3058) = 2.228，与 bf16 存档实测的 2.2281 吻合。
+
+**但实测证明这不影响分数——本表不是对分数的修正。**
+
+用同一份 fp32 权重、只切 `ROLLOUT_DTYPE` 跑 fp32 推理对照（n=16，三列诊断集）：
+
+| 模型 | τ 存活率 | bf16 | fp32 | fp32 − bf16 |
+|---|---|---|---|---|
+| merge5_c0.4 | **71.5%** | 49.16 | 48.31 | **−0.85** |
+| merge5_c1.0 | 96.6% | 57.95 | 57.54 | −0.41 |
+| MOPD_merge1.0 | 87.2% | 56.65 | 56.58 | −0.07 |
+
+三个模型都没有变好。`merge5_c0.4` 是决定性的：它丢掉 28.5% 的更新范数，fp32 推理
+下**毫无收益**。所以：
+
+1. **λ-sweep 不需要任何修正**，曲线形状是真实的，`merge5_c0.4` 的 60.63 就是该
+   系数的真实表现。
+2. **merge5 vs MOPD 的比较是公平的**（MOPD 的 −0.07 甚至小于 merge5_c1.0 的
+   −0.41），已发布分数全部有效，无需重跑。
+3. **真正的含义是：L2 范数不是 task vector 功能强度的好度量。** bf16 舍入按绝对值
+   截断，被抹掉的是每个坐标上最小的更新——它们占 28.5% 的 L2 范数，却几乎不贡献
+   函数变化。这比 DARE 的观察更强（不需要 rescale）。**凡是按 ‖τ‖ 做归一化的地方
+   （如 `research/experiments/20260916_norm_matched_subsets` 的系数计算），对齐的
+   都是一个与功能强度只有弱相关的量**，用作对照时应当说明。
+
+详见 `research/results/20260920_session_summary.md` §5。
+
 ## 3. 副结果：best@16
 
 | 模型 | aime25 | aime26 | gpqa | ifbench | ifeval | lcb_v5 | lcb_v6 | bfcl | **AVG8** | MATH | SCI | CODE |
@@ -195,6 +237,11 @@ outputs_llm_fusion/merge_4b_percoef/merged_models/
 | `examples/llm_fusion/merge/merge_llms_per_coefficient.py` | 逐专家系数的 Task Arithmetic：`merged = base + Σ λᵢ·(expertᵢ − base)` |
 | `examples/llm_fusion/merge/run_merge_per_coefficient.sh` | 上者的包装，`COEF_MATH/CODE/SCIENCE/IF/AGENT` 可覆盖 |
 | `run_eval_merge_sweep_5expert.sh` | 4 机并行评测驱动，含门禁（每节点 8 卡独立 Ray + sandbox + 权重） |
+| `run_sft_multinode.sh` | phase-1 SFT 站点启动器。torchrun + pssh fan-out（本仓库唯一），5 道门禁：batch/world_size 整除、row groups ≥ ranks、base 模型 eos 含 151645、worker 可达、chief 有 swanlab |
+| `examples/llm_fusion/sft/train_sft_qwen3_4b_base.sh` | SFT 超参与 `torchrun` 命令。**显式传 `optim.clip_grad=1.0`** —— 仓库共享默认 0.2 会裁掉 100% 的 SFT 步（overview 5b.1） |
+| `examples/llm_fusion/sft/dataset.py` | `M2RLSFTDataset`：前缀差分 tokenize 以保留 `reasoning_content`（stock verl 会静默丢光），解双重编码的 `tools`，按 rank 预分片 |
+| `examples/llm_fusion/sft/filter_by_token_length.py` | 按**训练截断前**的真实 token 长度离线过滤；用同一个 dataset 类计算，不做字符数估算 |
+| `tests/utils/dataset/test_m2rl_sft_dataset_on_cpu.py` | 19 个 CPU 断言（合成 parquet，可进 CI），含「先证明 stock verl 确实丢 reasoning」 |
 
 ### 5.3 复现命令
 

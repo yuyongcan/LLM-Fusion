@@ -38,6 +38,8 @@ export PYTHONUNBUFFERED=1
 
 M5="${B}/outputs_llm_fusion/merge_4b/merged_models"
 M3="${B}/outputs_llm_fusion/merge_4b_mcs/merged_models"
+# MOPD 训练产物：FSDP 分片先 `python -m verl.model_merger merge` 导成 HF 再进来
+HF="${B}/outputs_llm_fusion/hf_exports"
 LOG_DIR="${B}/logs/llm_fusion/eval_merge"
 mkdir -p "${LOG_DIR}"
 
@@ -60,6 +62,7 @@ for d in ${MODELS}; do
         merge3_ta0.8) MP="${M3}/task_arithmetic_scaling_coefficient_0.8" ;;
         merge3_ta1.0) MP="${M3}/task_arithmetic_scaling_coefficient_1.0" ;;
         merge3_ta1.2) MP="${M3}/task_arithmetic_scaling_coefficient_1.2" ;;
+        mopd_5t_4b_step400) MP="${HF}/mopd_5t_4b_step400" ;;
         *) echo "!! 未知模型名 ${d}，跳过" >&2; continue ;;
     esac
     EXP="eval_${d}_n${VAL_N}"

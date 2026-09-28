@@ -92,6 +92,18 @@ NCCL_ENV=(
     # swanlog 只是 SDK 的本地缓存（指标照样上传到 taiji-exp），不是训练产物，
     # 所以放 /tmp 不损失任何东西；Pod 重启丢掉也无所谓。
     SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-/tmp/swanlog_llm_fusion}
+    # SWANLAB_SAVE_DIR 也必须节点本地，而且这一条比 LOG_DIR 更致命（2026-09-22 实测）：
+    # 它决定 ~/.swanlab 等全局文件（.netrc 等）的位置，在 **import swanlab** 时就被读
+    # （env.py:183 SwanLabEnv.set_default -> get_save_dir），不是等到 swanlab.init()。
+    # get_save_dir() 出于安全只创建末级目录、不创建父目录，父目录不存在就抛
+    #   FileNotFoundError: <父目录> not found
+    # 本 Pod 注入的是 ${B}/basic_train_<task>/<instance>/swanlab，那个 <instance> 父目录
+    # **并不存在**，于是 head 和全部 worker 上 `import swanlab` 直接失败 ——
+    # run_train_multinode.sh 的 swanlab 门禁会报「没装 swanlab」，极具误导性（装着呢）。
+    #   验证：SWANLAB_SAVE_DIR=/tmp/x python -c "import swanlab"   # ok
+    #         python -c "import swanlab"                            # FileNotFoundError
+    # 同一个白名单问题：它不在 PPO_RAY_RUNTIME_ENV 里，只能在 ray start 时注入。
+    SWANLAB_SAVE_DIR=${SWANLAB_SAVE_DIR_OVERRIDE:-/tmp/swanlab_llm_fusion}
 )
 
 echo "拓扑: ${#NODE_IPS[@]} 机 × ${NGPU} 卡 = ${EXPECT_GPU}   head=${HEAD_IP}   iface=${IFNAME}"
@@ -182,15 +194,23 @@ def probe():
             return 'ok'
         except Exception as e:
             return f'BAD({type(e).__name__})'
+    # 光查环境变量抓不住 SWANLAB_SAVE_DIR 那个坑（父目录不存在 -> import 就炸），
+    # 所以这里真的 import 一次。放在最后，失败也只影响本探针。
+    def _import_ok():
+        try:
+            import swanlab  # noqa: F401
+            return 'ok'
+        except Exception as e:
+            return f'BAD({type(e).__name__})'
     return (socket.gethostbyname(socket.gethostname()), os.environ.get('NCCL_NET_GDR_LEVEL'),
             os.environ.get('NCCL_SOCKET_IFNAME'), bool(os.environ.get('SWANLAB_API_KEY')),
-            _swanlog_ok())
+            _swanlog_ok(), _import_ok())
 seen = {}
-for ip, gdr, ifn, sw, swdir in ray.get([probe.remote() for _ in range($EXPECT_GPU)]):
-    seen[ip] = (gdr, ifn, sw, swdir)
-bad = [k for k, v in seen.items() if v[0] != '0' or not v[2] or v[3] != 'ok']
+for ip, gdr, ifn, sw, swdir, imp in ray.get([probe.remote() for _ in range($EXPECT_GPU)]):
+    seen[ip] = (gdr, ifn, sw, swdir, imp)
+bad = [k for k, v in seen.items() if v[0] != '0' or not v[2] or v[3] != 'ok' or v[4] != 'ok']
 for ip, v in sorted(seen.items()):
-    print(f'  {ip}: NCCL_NET_GDR_LEVEL={v[0]} IFNAME={v[1]} SWANLAB_API_KEY={\"set\" if v[2] else \"MISSING\"} SWANLAB_LOG_DIR={v[3]}')
+    print(f'  {ip}: NCCL_NET_GDR_LEVEL={v[0]} IFNAME={v[1]} SWANLAB_API_KEY={\"set\" if v[2] else \"MISSING\"} SWANLAB_LOG_DIR={v[3]} import_swanlab={v[4]}')
 raise SystemExit(1 if bad else 0)
 " 2>&1 | grep -E '^  [0-9]' || { echo "ERROR: NCCL/SwanLab 环境没传到 worker（跨机 FSDP 会失败 / swanlab.init 会要求交互登录或写不了 log_dir）" >&2; exit 1; }
 

@@ -156,6 +156,11 @@ class FSDPModelMerger(BaseModelMerger):
             for future in tqdm(futures, desc=f"Loading {total_shards} FSDP shards", total=total_shards):
                 future.result()
 
+        # The shards hold the fp32 master weights. Downcasting here would be
+        # lossy for anything that later takes differences against a base model,
+        # so the dtype is the caller's choice and defaults to float32.
+        save_dtype = self.config.torch_save_dtype
+
         # Merge state dicts from all shards
         state_dict = {}
         param_placements: dict[str, list] = {}
@@ -166,7 +171,7 @@ class FSDPModelMerger(BaseModelMerger):
                 # add tensor shard in order of rank to state_dict[key]
                 tensor = model_state_shard.pop(key)
                 if isinstance(tensor, DTensor):
-                    state_dict[key].append(tensor._local_tensor.bfloat16())
+                    state_dict[key].append(tensor._local_tensor.to(save_dtype))
 
                     placements = tuple(tensor.placements)
                     # replicated placement at dp dimension can be discarded
@@ -178,7 +183,7 @@ class FSDPModelMerger(BaseModelMerger):
                     else:
                         assert param_placements[key] == placements
                 else:
-                    state_dict[key].append(tensor.bfloat16())
+                    state_dict[key].append(tensor.to(save_dtype))
 
         del model_state_dict_lst
 
@@ -229,7 +234,9 @@ class FSDPModelMerger(BaseModelMerger):
     def _validate_state_dict(self, state_dict: dict[str, torch.Tensor]):
         auto_model_class = self.get_transformers_auto_model_class()
 
-        hf_model = auto_model_class.from_pretrained(self.config.test_hf_dir, torch_dtype=torch.bfloat16)
+        hf_model = auto_model_class.from_pretrained(
+            self.config.test_hf_dir, torch_dtype=self.config.torch_save_dtype
+        )
         hf_state_dict = hf_model.state_dict()
         del hf_model
 

@@ -51,11 +51,24 @@ VAL_TOP_P=${VAL_TOP_P:-0.95}
 # Left unset, verl puts the whole suite in one batch: ~1.4k prompts times VAL_N.
 VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-128}
 
+# 5120 covers 100% of the eval suite. The longest prompts are BFCL v3 at 4873
+# tokens -- its rows carry 18-39 tool schemas, which dominate the text -- and one
+# 2819-token GPQA item; the seven tool-free sets all have p99 under 1400. See the
+# measured distribution in ../train/train_mix_rl.sh. `truncation='error'` aborts
+# on an overlong prompt rather than cutting it, so filter_overlong_prompts below
+# drops outliers at load.
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-5120}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-24576}
 
 ROLLOUT_TP=${ROLLOUT_TP:-1}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.8}
+# Inference dtype. bfloat16 matches training and is what every reported number
+# uses. float32 is for precision controls only: a task vector theta - theta_base
+# is small enough that a good fraction of its entries fall below one bfloat16
+# rounding unit. Note a matched control found no score difference either way, so
+# fp32 here is a diagnostic, not an accuracy fix. Weights double to ~16GB, so
+# drop ROLLOUT_GPU_MEM_UTIL alongside it.
+ROLLOUT_DTYPE=${ROLLOUT_DTYPE:-bfloat16}
 
 # verl builds the actor worker even in val_only mode, so these still have to be
 # set: FSDPActorConfig refuses to instantiate without either use_dynamic_bsz or
@@ -88,7 +101,7 @@ DATA=(
     data.val_batch_size=${VAL_BATCH_SIZE}
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
-    data.filter_overlong_prompts=False
+    data.filter_overlong_prompts=True
     data.truncation='error'
     data.return_raw_chat=True
 )
@@ -118,6 +131,7 @@ REF=(
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${INFER_BACKEND}
     actor_rollout_ref.rollout.mode=async
+    actor_rollout_ref.rollout.dtype=${ROLLOUT_DTYPE}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
     actor_rollout_ref.rollout.enforce_eager=False
@@ -139,6 +153,16 @@ ROLLOUT=(
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=${MAX_PARALLEL_CALLS}
     actor_rollout_ref.rollout.multi_turn.max_tool_response_length=${MAX_TOOL_RESPONSE_LENGTH}
 )
+
+# With float32 inference the KV cache is fp32 too, and vLLM preallocates against
+# the model config's nominal max_position_embeddings (262144 for Qwen3-4B), which
+# needs ~72 GiB -- more than gpu_memory_utilization can grant, so the engine
+# refuses to start. The real ceiling here is MAX_PROMPT_LENGTH +
+# MAX_RESPONSE_LENGTH, far below that, so cap the unused context when set. This
+# only affects KV preallocation, not the outputs.
+if [[ -n "${MAX_MODEL_LEN:-}" ]]; then
+    ROLLOUT+=( actor_rollout_ref.rollout.max_model_len=${MAX_MODEL_LEN} )
+fi
 
 TRAINER=(
     trainer.critic_warmup=0

@@ -29,6 +29,10 @@ bash setup_ray_cluster.sh
 bash run_train_multinode.sh agent     # 或 math/science/code/if/mix
 ```
 
+> **SFT（phase 1）是例外**：`bash run_sft_multinode.sh` 走 torchrun + pssh，
+> **不需要第 2、3 步**（没有 Ray 集群、没有 sandbox），只要 ssh 通 + 每个节点有
+> Python 环境。见 §3 的限定说明和 `overview.md` §5b。
+
 第 3、4 步的脚本**已改成从 `NODE_IP_LIST` 自动推导拓扑**，换机器不用改代码。
 
 > 第 4 步首次启动约一半概率会炸在 vLLM 的 `EADDRINUSE`（端口竞争）——
@@ -135,14 +139,21 @@ OK: 2 机 16 卡就绪
 ```
 
 
-### ⚠️ 为什么不需要 pssh fan-out（别照抄 MOPD 那套）
+### ⚠️ 为什么 RL 不需要 pssh fan-out（别照抄 MOPD 那套）
 
 `MOPD/mopd_sft/launch_multinode.sh` 用 pssh 把训练脚本分发到每台机器，**因为
 torchrun 不是 Ray**：torchrun 只 fork 本地 8 个 rank，必须每台各起一份、各带不同
 `--node_rank`。
 
-verl 是 Ray-based：**head 单点提交一次，Ray 自己把 WorkerDict 调度到全集群**。
-照搬 fan-out 会起两份互相抢卡的作业。（那个脚本自己的注释也写明了这个区别。）
+`verl.trainer.main_ppo` 是 Ray-based：**head 单点提交一次，Ray 自己把 WorkerDict
+调度到全集群**。照搬 fan-out 会起两份互相抢卡的作业。（那个脚本自己的注释也写明了
+这个区别。）
+
+> ⚠️ **但这条只适用于 RL。** `verl.trainer.sft_trainer` 是**纯 torchrun**，所以
+> `run_sft_multinode.sh` 确实用了 pssh fan-out，是本仓库唯一这么做的入口。它不需要
+> Ray 集群（不用先跑 `setup_ray_cluster.sh`），也不需要 sandbox。
+> 详见 `overview.md` §5b.3 —— 那里也说明了为什么 `sft_trainer_ray.py` 在本数据量下
+> 不能用。
 
 ### ⚠️ 卡数不够时 verl 会静默 pending 挂住
 
@@ -329,9 +340,10 @@ bash run_train_multinode.sh mix        # 800 步，自动切到 train_mix_rl.sh
 bash run_train_multinode.sh code trainer.val_before_train=True   # 可追加 hydra override
 ```
 
-拓扑自动推导，超参默认全按论文（batch 128 / mini 128 / n=16 / resp 16384 /
+拓扑自动推导，超参默认基本按论文（batch 128 / mini 128 / n=16 /
 prompt 5120 / lr 1e-6 / GRPO + `norm_adv_by_std_in_grpo=FALSE` / KL loss
-`low_var_kl` coef 0.001 / temp 1.0）。所有 `XXX=${XXX:-默认}` 都可以用环境变量覆盖。
+`low_var_kl` coef 0.001 / temp 1.0）。resp 默认 24576（论文 16384），给长思维链
+留余量。所有 `XXX=${XXX:-默认}` 都可以用环境变量覆盖。
 
 ### ⚠️ Agent 域必须传 `default_agent_loop=tool_agent`
 
@@ -507,6 +519,14 @@ global_step_25/actor/model_world_size_16_rank_{0..15}.pt
 
 ## 9. 待做
 
+- [x] **SFT 链路整合 + 冒烟通过**（2026-09-27，8 机 64 卡 20 步）：64 rank 分片契约、
+      loss 1.025→0.879、hf_model 导出 + eos 正确、CPU 加载生成正常。见 `overview.md` §5b。
+- [ ] **起完整 SFT run**：`bash run_sft_multinode.sh`（10000 步，约 **6.5 天**，占满 8 台机）。
+      ⚠️ **不要为了「用满卡」去放大 `TRAIN_BATCH_SIZE` 或 `MAX_TOKEN_LEN_PER_GPU`** ——
+      1280 / 65536 都已是显存上限，再加会贴顶导致单步几十分钟跑不完（表现像挂死，
+      不报错）；且 FSDP 的 all-gather 是 per-micro-batch 的，加 batch 不省通信。
+      已确认唯一有效的加速项是 `USE_LIGER=1`（已设为默认）。见 overview §5b.6/5b.7。
+      跑完后可用它替换 RL 的起点模型做对照。
 - [ ] 训完 Agent → 用 `run_repro.sh code` **重评 LCB v5/v6**（§8a 那三个点作废）
 - [x] `science` expert：本机 2026-09-11 12:44 起跑，300 步约 41 小时（§8b）
 - [x] `if` expert：第三台机 2026-09-11 14:17 起跑，1×8，300 步约 25 小时（§8c）
@@ -538,6 +558,14 @@ global_step_25/actor/model_world_size_16_rank_{0..15}.pt
 | **`ERROR: <ip> 上没有 swanlab`（但明明装了）** | **预检把 stderr 的 `FutureWarning` 折进了变量，已修** | **§5** |
 | LCB 分数腰斩且多次不变 | 某些节点没有 sandbox | §2 |
 | reward 全 0 / `num_turns/mean == 1` | 漏了 `default_agent_loop=tool_agent` | §5 |
+| **SFT loss 在 step ~100 触底后单调上升** | **`optim.optimizer=Adam` 的耦合 L2（wd=0.1 被 1/sqrt(v) 放大）；用 AdamW** | **overview 5b.2** |
+| **SFT loss 降得异常慢、grad_norm 贴着 0.2** | **继承了 RL 的 `clip_grad=0.2`，裁掉 100% 的 SFT 步；显式传 `optim.clip_grad=1.0`** | **overview 5b.1** |
+| **SFT 单步几十分钟跑不完，GPU 却 100%、不报错** | **显存贴顶后 allocator 反复扩缩（调大了 batch 或 token 预算）。py-spy 会一直采到 `_engine_run_backward`** | **overview 5b.6** |
+| **SFT MFU 看起来只有 0.2** | **`tail -1` 落在 step 1–5 的预热区；step≥6 才是稳定值** | **overview 5b.7a** |
+| **SFT 一个 epoch 步数只有预期的 1/N** | **`rank_sharded` 补丁没生效，预分片数据被二次分片** | **overview 5b.4** |
+| **SFT 加载阶段就 OOM（内存，非显存）** | **漏了 `SFT_SHARD_BY_RANK=1`，每 rank 要 ~700GB** | **overview 5b.4** |
+| SFT checkpoint 生成不停、全是 `finish_reason=length` | base 模型的 `eos_token_id` 不含 151645 | overview 5b.6 |
+| `Prefix render is not monotonic` 警告 | 正常，Qwen3 模板重写尾轮空 `<think>`；该行降级逐轮 tokenize，不丢 reasoning | overview 5b.6 |
 | `import verl` 失败 | 新节点没做 editable 注册（`pip install -e . --no-deps`） | ⚠️ 见下 |
 | numpy/torch/vllm 突然坏掉 | `pip install -e .` 漏了 `--no-deps`，把 numpy 降级了 | ⚠️ 见下 |
 | NLTK 语料一个都下不下来 | 缺 `NLTK_ALLOW_PROXIED_URLOPEN=1` | ⚠️ 见下 |

@@ -349,6 +349,92 @@ class TestComputeDataMetrics(unittest.TestCase):
         self.assertIn("critic/rewards/mean", metrics)
         self.assertIn("response_length/mean", metrics)
 
+    def test_grpo_group_metrics_split_by_domain(self):
+        """Per-domain GRPO group statistics, the mixed-domain training diagnostic.
+
+        Four prompts sampled three times each: Math is mixed (carries gradient),
+        the two IF groups are uniformly wrong and uniformly right respectively
+        (both degenerate), and Code is mixed.
+        """
+        batch = MagicMock()
+        rewards = torch.tensor(
+            [
+                [0.0, 0.0],
+                [0.5, 0.5],
+                [0.5, 0.5],  # Math: per-sample sums 0, 1, 1
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],  # IF group b: all wrong
+                [0.5, 0.5],
+                [0.5, 0.5],
+                [0.5, 0.5],  # IF group c: all right
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.5, 0.5],  # Code: 0, 0, 1
+            ]
+        )
+        n = rewards.shape[0]
+        batch.batch = {
+            "token_level_scores": rewards,
+            "token_level_rewards": rewards,
+            "advantages": torch.zeros_like(rewards),
+            "returns": torch.zeros_like(rewards),
+            "prompts": torch.zeros((n, 2)),
+            "responses": torch.zeros((n, 2)),
+            "attention_mask": torch.ones((n, 4), dtype=torch.long),
+            "response_mask": torch.ones((n, 2), dtype=torch.long),
+        }
+        batch.non_tensor_batch = {
+            "uid": np.array(["a"] * 3 + ["b"] * 3 + ["c"] * 3 + ["d"] * 3),
+            "data_source": np.array(
+                ["LLM-Fusion/Math"] * 3 + ["LLM-Fusion/IF"] * 6 + ["LLM-Fusion/Code"] * 3
+            ),
+        }
+
+        metrics = compute_data_metrics(batch, use_critic=False)
+
+        # IF: both groups degenerate, so no gradient and an even wrong/right split
+        self.assertEqual(metrics["grpo/group_by_domain/if/num_groups"], 2.0)
+        self.assertEqual(metrics["grpo/group_by_domain/if/effective_groups"], 0.0)
+        self.assertAlmostEqual(metrics["grpo/group_by_domain/if/zero_var_frac"], 1.0)
+        self.assertAlmostEqual(metrics["grpo/group_by_domain/if/all_wrong_frac"], 0.5)
+        self.assertAlmostEqual(metrics["grpo/group_by_domain/if/all_right_frac"], 0.5)
+        self.assertAlmostEqual(metrics["grpo/group_by_domain/if/reward_std_mean"], 0.0)
+
+        # Math and Code each have one mixed group: std of (0,1,1) with ddof=1
+        for name in ("math", "code"):
+            self.assertEqual(metrics[f"grpo/group_by_domain/{name}/num_groups"], 1.0)
+            self.assertEqual(metrics[f"grpo/group_by_domain/{name}/effective_groups"], 1.0)
+            self.assertAlmostEqual(metrics[f"grpo/group_by_domain/{name}/zero_var_frac"], 0.0)
+            self.assertAlmostEqual(
+                metrics[f"grpo/group_by_domain/{name}/reward_std_mean"], 0.5773502691896258, places=6
+            )
+
+        # aggregate stays consistent: 2 of 4 groups carry gradient
+        self.assertAlmostEqual(metrics["grpo/group_zero_var/frac"], 0.5)
+        self.assertEqual(metrics["grpo/num_groups"], 4.0)
+
+    def test_grpo_group_metrics_absent_without_data_source(self):
+        """The per-domain split is skipped when the batch carries no data_source."""
+        batch = MagicMock()
+        rewards = torch.tensor([[0.0, 0.0], [0.5, 0.5], [0.5, 0.5]])
+        batch.batch = {
+            "token_level_scores": rewards,
+            "token_level_rewards": rewards,
+            "advantages": torch.zeros_like(rewards),
+            "returns": torch.zeros_like(rewards),
+            "prompts": torch.zeros((3, 2)),
+            "responses": torch.zeros((3, 2)),
+            "attention_mask": torch.ones((3, 4), dtype=torch.long),
+            "response_mask": torch.ones((3, 2), dtype=torch.long),
+        }
+        batch.non_tensor_batch = {"uid": np.array(["a", "a", "a"])}
+
+        metrics = compute_data_metrics(batch, use_critic=False)
+
+        self.assertIn("grpo/group_reward_std/mean", metrics)
+        self.assertFalse([k for k in metrics if k.startswith("grpo/group_by_domain/")])
+
 
 class TestComputeTimingMetrics(unittest.TestCase):
     """Tests for the compute_timing_metrics function."""

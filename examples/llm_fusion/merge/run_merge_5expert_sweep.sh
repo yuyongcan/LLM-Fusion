@@ -40,7 +40,7 @@ export MERGE_OUT_ROOT=${MERGE_OUT_ROOT:-${OUTPUT_ROOT}/merge_4b}
 # ---- the sweep -------------------------------------------------------------
 # lambda = 0.6 already exists in merge_4b and is skipped by already_merged().
 export SCALINGS=${SCALINGS:-"0.4 0.8 1.0 1.2"}
-export SAVE_DTYPE=${SAVE_DTYPE:-bfloat16}
+export SAVE_DTYPE=${SAVE_DTYPE:-float32}
 export WEIGHT_MASK_RATE=${WEIGHT_MASK_RATE:-0.2}
 # Task Arithmetic only; the method comparison is not part of this sweep.
 export RUN_ALL_METHODS=0

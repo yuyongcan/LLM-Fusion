@@ -121,9 +121,21 @@ class RLHFDataset(Dataset):
 
         # Mirror AgentLoopWorker's tool loading so length filtering sees the
         # same schemas the rollout will.
+        #
+        # "the same schemas" is per-row, not the whole tool config. Attaching every
+        # tool to every row overstates the prompt by the size of the full config --
+        # the 155-tool WorkBench+BFCL set alone tokenises to ~19.4k, so any
+        # max_prompt_length below that filters out the entire dataset. Two things
+        # decide what a row actually gets:
+        #   - the resolved agent loop: single_turn_agent passes no tools at all,
+        #     so single-domain Math/Science/Code/IF rows carry zero tool overhead
+        #   - extra_info.tool_selection: tool_agent narrows the global set down to
+        #     this subset (ToolAgentLoop.run), so only these count
         self.tool_config_path = config.get("tool_config_path", None)
         self.function_tool_path = config.get("function_tool_path", None)
+        self.default_agent_loop = config.get("default_agent_loop", "single_turn_agent")
         self.tool_schemas = None
+        self.tool_schemas_by_name = {}
         if self.tool_config_path or self.function_tool_path:
             try:
                 from verl.tools.tool_registry import load_all_tools
@@ -135,6 +147,10 @@ class RLHFDataset(Dataset):
                 self.tool_schemas = [
                     tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list
                 ]
+                self.tool_schemas_by_name = {
+                    tool.tool_schema.function.name: schema
+                    for tool, schema in zip(tool_list, self.tool_schemas, strict=True)
+                }
             except Exception as e:
                 logger.warning(
                     "Failed to initialize tools (tool_config_path=%s, function_tool_path=%s): %s",
@@ -143,6 +159,7 @@ class RLHFDataset(Dataset):
                     e,
                 )
                 self.tool_schemas = None
+                self.tool_schemas_by_name = {}
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
         self.num_workers = min(self.num_workers, os.cpu_count()) if self.num_workers is not None else None
@@ -219,6 +236,30 @@ class RLHFDataset(Dataset):
             merged = pa.concat_tables(tables, promote_options="permissive").replace_schema_metadata(None)
             return datasets.Dataset(merged)
 
+    def _row_tool_schemas(self, doc) -> list | None:
+        """The tool schemas the rollout will actually put in this row's prompt.
+
+        Mirrors AgentLoopWorker's dispatch (agent_loop.py) and ToolAgentLoop.run:
+        rows without an `agent_name` fall back to `default_agent_loop`, and only
+        `tool_agent` gets tools -- narrowed to `extra_info.tool_selection` when the
+        row carries one. Returns None when no tools apply, which is what
+        `apply_chat_template` wants for a tool-free prompt.
+        """
+        if not self.tool_schemas:
+            return None
+
+        agent_name = doc.get("agent_name") or self.default_agent_loop
+        if agent_name != "tool_agent":
+            return None
+
+        extra_info = doc.get("extra_info") or {}
+        tool_selection = extra_info.get("tool_selection") if hasattr(extra_info, "get") else None
+        if tool_selection is None or len(tool_selection) == 0:
+            return self.tool_schemas
+
+        selected = [self.tool_schemas_by_name[name] for name in tool_selection if name in self.tool_schemas_by_name]
+        return selected or None
+
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts
         if self.filter_overlong_prompts:
@@ -233,8 +274,9 @@ class RLHFDataset(Dataset):
                         messages = self._build_messages(doc, key=self.prompt_key)
                         # pass tool schemas if available so the processor can format prompts
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
-                        if self.tool_schemas is not None:
-                            apply_kwargs["tools"] = self.tool_schemas
+                        row_tools = self._row_tool_schemas(doc)
+                        if row_tools is not None:
+                            apply_kwargs["tools"] = row_tools
 
                         raw_prompt = self.processor.apply_chat_template(
                             messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
@@ -273,8 +315,9 @@ class RLHFDataset(Dataset):
                 def doc2len(doc) -> int:
                     try:
                         apply_kwargs = dict(**self.apply_chat_template_kwargs)
-                        if self.tool_schemas is not None:
-                            apply_kwargs["tools"] = self.tool_schemas
+                        row_tools = self._row_tool_schemas(doc)
+                        if row_tools is not None:
+                            apply_kwargs["tools"] = row_tools
 
                         # Keep explicit tokenization to avoid transformers version default changes.
                         apply_kwargs.pop("tokenize", None)

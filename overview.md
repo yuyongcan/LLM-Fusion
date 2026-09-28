@@ -27,6 +27,12 @@ bash setup_sandbox.sh             # ⚠️ 每个节点都要跑一次
 bash setup_ray_cluster.sh         # 两节点重建 Ray，带 16 卡门禁
 bash run_train_agent_full.sh      # Agent expert，约 41 小时
 
+# SFT（phase 1：Qwen3-4B-Base → chat/reasoning 模型）—— 见第 5b 节
+# ⚠️ 不需要 Ray、不需要 sandbox；它是 torchrun + pssh，本仓库唯一这么起的入口
+TOTAL_TRAINING_STEPS=20 SAVE_FREQ=10 EXPERIMENT_NAME=sft_smoke_qwen3_4b_base \
+    bash run_sft_multinode.sh     # 冒烟 20 步，约 25 min（8 机 64 卡）
+bash run_sft_multinode.sh         # 完整 1 epoch，10000 步，约 6.5 天（Liger 默认开）
+
 # 评测（4 个模型 × 6 个不需要 sandbox 的基准）
 bash run_repro.sh nosandbox
 bash run_repro.sh code            # LCB v5/v6，需要 sandbox 在 8080
@@ -542,6 +548,230 @@ print(ray.get([probe.remote() for _ in range(16)]))   # 两个节点都要出现
 
 ---
 
+## 5b. SFT 链路（phase 1：Qwen3-4B-Base → chat/reasoning 模型，2026-09-27）
+
+本仓库原先没有 project 级的 SFT，所有 RL 都从 HF 的 `Qwen3-4B-Instruct-2507` 起跑。
+这一节记的是从 `../MOPD/mopd_sft/` 整合进来的 SFT 流水线。
+
+```bash
+# 冒烟（20 步，先打通链路）
+TOTAL_TRAINING_STEPS=20 SAVE_FREQ=10 MAX_CKPT_TO_KEEP=2 \
+EXPERIMENT_NAME=sft_smoke_qwen3_4b_base bash run_sft_multinode.sh
+
+# 完整 1 epoch
+TOTAL_TRAINING_STEPS=10000 SAVE_FREQ=200 bash run_sft_multinode.sh
+```
+
+| 文件 | 作用 |
+| :--- | :--- |
+| `run_sft_multinode.sh` | 站点启动器：拓扑推导、5 道门禁、pssh fan-out、`setsid nohup` |
+| `examples/llm_fusion/sft/train_sft_qwen3_4b_base.sh` | 超参与 `torchrun` 命令 |
+| `examples/llm_fusion/sft/dataset.py` | 保留 `reasoning_content` 的 `M2RLSFTDataset` |
+| `examples/llm_fusion/sft/filter_by_token_length.py` | 按真实训练 token 长度离线过滤 |
+| `tests/utils/dataset/test_m2rl_sft_dataset_on_cpu.py` | 19 个 CPU 断言（合成数据，可进 CI） |
+
+### 5b.1 ⚠️ SFT 会继承 RL 的 `clip_grad=0.2`，裁掉 100% 的步
+
+`verl/trainer/config/optim/fsdp.yaml` 里 `clip_grad` 被本仓库从上游的 `1.0` 改成了
+`0.2`（为了 §5 那次 RL 崩溃，RL 的 grad_norm 中位数 0.02 / p90 0.05）。这个 group 是
+**SFT 和 RL 共用**的，而 SFT 的 grad_norm 完全是另一个量级 —— 实测 205 步：
+
+```text
+mean 0.486   p50 0.362   p90 0.784   p99 1.767   max 1.825
+clip_grad=0.2 会裁剪：205/205 步 (100.0%)
+clip_grad=1.0 会裁剪： 15/205 步 (7.3%)
+```
+
+所以 `train_sft_qwen3_4b_base.sh` **显式传 `optim.clip_grad=1.0`**。不要改 YAML 默认值
+（那是 RL 的稳定性边界），也不要把这行「简化」掉 —— 继承 0.2 会缩放每一次更新，且没有
+任何报错能看出来。本次冒烟 step 4 实测 grad_norm 冲到 **7.25**，确实需要 1.0 来裁。
+
+### 5b.2 ⚠️ `Adam` + `weight_decay=0.1` 会让 loss 在 step ~100 后单调上升
+
+论文 Appendix A 写的是「Adam ... weight decay 0.1」。照字面用 `torch.optim.Adam`，它的
+`weight_decay` 是**耦合 L2** —— 惩罚项加到梯度上，再被 Adam 的二阶矩估计除，有效强度按
+`1/sqrt(v)` 缩放。0.1 对 AdamW 正常，对 Adam 极大。
+
+实测三个 run（不同 batch size、不同 LR schedule）全部复现同一个失败特征：
+
+```text
+Adam  (bs=1280, cosine)    min 0.8797 @ step 115  →  1.1639 @ step 363   +32.3%
+Adam  (bs=5120, constant)  min 0.8932 @ step  38  →  1.1519 @ step 270   +29.0%
+AdamW (bs=1280, cosine)    205 步单调下降到 0.6626，无反弹
+```
+
+grad_norm 与 loss 同步上升（0.64 → 1.99）。现代论文写「Adam + weight decay」几乎都是指
+AdamW，所以默认 `OPTIMIZER=AdamW`；`OPTIMIZER=Adam` 可复现字面读法。
+
+### 5b.3 ⚠️ 这里**需要** pssh fan-out —— 与 §4c 和 HANDOFF §3 不矛盾
+
+§4c 和 `HANDOFF.md` §3 说「别照抄 MOPD 那套 fan-out 启动器」。那条规则针对的是 **RL**：
+`verl.trainer.main_ppo` 是 Ray-based，chief 提交一次，Ray 调度全集群。
+
+但 `verl.trainer.sft_trainer` 是**纯 torchrun**，`--nnodes=N` 只 fork 本地 rank 然后阻塞在
+rendezvous，必须每台机器各起一份并给不同的 `--node_rank`；本平台又是
+`TAIJI_BASIC_EXEC_START_IN_ALL_MPI_PODS=false`，只有 chief 执行 `start_cmd`。所以 SFT 是
+本仓库**唯一**需要 fan-out 的入口。
+
+`verl/trainer/sft_trainer_ray.py` 确实存在、也能保留 head 单点提交，但本数据量下不可用：
+它的 `_build_dataloader` 写死 `dp_rank=0 / dp_size=1`（`sft_trainer_ray.py:181-185`），即
+**在 driver 单进程加载全量数据集**（实测 7.7 GB/110k 行 → 12.2M 行约 855 GB），且不认下面
+的 `rank_sharded` 契约。
+
+### 5b.4 按 rank 预分片，以及配套的 trainer 补丁
+
+`sft_trainer.py` 让**每个** rank 都构建全量数据集再用 `DistributedSampler` 切分。实测一个
+进程每 110k 行占 ~7.7 GB（在 110k/220k/440k 行处验证过，线性），全量 12.2M 行约 700 GB，
+每机 8 个 rank 要 ~5.6 TB 对 2.2 TB 内存 —— 光加载就 OOM。
+
+`SFT_SHARD_BY_RANK=1` 让每个 rank 只读 `row_groups[rank::world_size]`。但这需要 trainer
+配合：`verl/trainer/sft_trainer.py` 已加上 `rank_sharded` 检测，对预分片数据集改用
+`DistributedSampler(num_replicas=1, rank=0)`。**缺了这一半就会二次分片**，一个 epoch 静默
+只训 `1/world_size` 的数据（MOPD 侧实测 27582 步塌成 861 步），不报错。
+
+本次 8×8 实测确认契约成立 —— 各 rank 分片不等长，但 sampler 长度完全一致：
+
+```text
+dataset len: 200000 (rank 6/64 shard, sampler len: 200000)
+dataset len: 191724 (rank 3/64 shard, sampler len: 200000)
+distinct sampler len 值：只有 1 个
+```
+
+短分片在 `__getitem__` 里循环重复本地尾部少量样本，保证所有 rank 执行相同数量的
+collective。代价是 padding overhead **4.74%**（min 181403 / max 200000 行），也正因为按
+最大分片对齐，一个 epoch 是 **10000 步**而不是 `12220841/1280 = 9548` 步。
+
+### 5b.5 MFU ≈ 0.36 是怎么来的：三件事叠在一起，其中两件不是问题
+
+先说一个**取样陷阱**：`tail -1` 抓 MFU 会落在预热区。实测 step 1–5 是 0.19~0.22，
+step 6 起才稳定在 0.30~0.40（平均 **0.360**）。判断 MFU 必须掐掉前 5 步。
+
+**(1) verl 的 MFU 分母系统性低估 1.33 倍。**
+`verl/utils/flops_counter.py:110` 用 `6*N*tokens`（前向 2 + 反向 4），但
+`model.enable_gradient_checkpointing=True` 是开着的 —— 反向要重算一遍前向，实际是
+`8*N*tokens`。所以**任何开了梯度重算的 verl run，MFU 都被低估 8/6**：
+
+| | verl 口径 | 真实算力占用 |
+| :--- | ---: | ---: |
+| 单卡 T=16384（零通信） | 0.497 | 0.663 |
+| 4 机 32 卡 | 0.453 | 0.604 |
+| 8 机 64 卡 | 0.360 | 0.480 |
+
+**(2) 单卡天花板本来就只有 0.50，所以 32 卡的 0.45 已经接近极限。**
+在单卡上跑同样的 fwd+bwd（**完全没有任何通信**）实测：
+
+```text
+gc=ON  T= 8192:  verl_MFU=0.510   attention 平方项占记账 flops 的 23.1%
+gc=ON  T=16384:  verl_MFU=0.497   attention 平方项占 37.5%
+gc=ON  T=32768:  verl_MFU=0.475   attention 平方项占 54.6%
+```
+
+- **32 卡 / 单卡 = 91%** → FSDP 通信只吃掉 9%，**32 卡压根不是通信瓶颈**
+- 64 卡 / 单卡 = 72% → 只有这里有 28% 的真损失
+
+随 T 增大 MFU 下降是 **attention 的 O(T²)**，这部分算力是真花了，不是浪费。
+单卡纯 bf16 GEMM 实测 139 TFLOPS（标称 148 的 94%），硬件本身没问题。
+
+**(3) 梯度重算的代价是 30%，但它是必需的。**
+同卡、唯一变量：`gc=ON` 3406 ms vs `gc=OFF` 2618 ms（T=8192）。但关掉后 T=16384
+直接 OOM（T=8192 就要 70.8 GB）。这 30% 是买显存的价钱。
+
+> ⚠️ **本节曾写成「64 卡是通信瓶颈」，那是错的**（基于 `tail -1` 抓到的预热值 0.203，
+> 且没有单卡对照）。真实可优化量只有 64 卡那 28%：0.360 → 最多 ~0.49，而不是
+> 「有一倍空间」。实际能拿到的只有 Liger 的 +6%（见 §5b.7）。
+
+**一个完整 epoch 约 6.5 天**（10000 步 × 56 s，开 Liger）。取样口径见 §5b.7a。
+
+### 5b.6 ⚠️ 放大 batch size 不能提 MFU，而且 bs=5120 会贴爆显存
+
+直觉上「64 卡每卡只 20 条序列，加大 batch 就能摊薄通信」—— 实测是错的，两个原因：
+
+**FSDP 的 all-gather 是 per-micro-batch 的。** token 预算 65536 不变时，
+bs=1280→5120 只是把每卡 2 个 micro-batch 变成 6 个，通信次数同比例增加。它只是把
+4 步合成 1 步，**对每 token 的通信量没有任何改善**。
+
+**而且装不下。** bs=1280 时 reserved 已是 79.7 / 95 GB，余量仅 15 GB。bs=5120 实测
+占到 **86~89 GB**，`backward` 严重变慢 —— 单步跑了 25 分钟还没出来（GPU 100%、
+py-spy 反复采到 `_engine_run_backward`，不是挂死，是 allocator 在上限反复扩缩）。
+
+所以**要放大 batch，必须先腾出显存**（见 §5b.7 的 Liger）。另外按 §5b.2，
+`sft_loss` 是 token-mean，梯度幅度与 batch 无关 —— bs=1280→5120 会把 update 次数从
+10000 砍到 2500，LR 不同步提高（sqrt 缩放约 1e-4）就是**欠训**。
+
+### 5b.7 真正有效的加速项：只有 Liger
+
+逐个标定过 `engine/fsdp.yaml` 里的开关。**64 卡集群 10 步实测**（独占，取 step≥6）：
+
+| 配置 | MFU | s/it（稳定期瞬时） | reserved | 结论 |
+| :--- | ---: | ---: | ---: | :--- |
+| `use_liger=0` budget 65536 | 0.360 | 60~65 | 79.7 GB | 基线 |
+| **`use_liger=1` budget 65536** | **0.383** | **55~57** | **73.7 GB** | ✅ **用这个** |
+| `use_liger=1` budget 98304 | — | 单步 >9 min 未完成 | 87 GB 贴顶 | ❌ 装不下 |
+
+单卡对照（T=16384，独占，`gc=ON`）：`liger=0` 8616 ms / 38.6 GB →
+`liger=1` 7914 ms / **24.5 GB**，即 +8.9% 速度、激活显存 −37%。集群 +6%，方向一致。
+
+其余开关都不值得动：
+
+| 选项 | 实测/判断 | 结论 |
+| :--- | :--- | :--- |
+| `engine.use_torch_compile` | 只包 `entropy_from_logits`（PPO 路径）；SFT 的 `sft_loss` 不碰它 | ❌ **no-op** |
+| `engine.reshard_after_forward=false` | 即 `SHARD_GRAD_OP`，省掉反向 all-gather，但参数常驻，显存反而更紧 | ❌ 没余量 |
+| `ulysses_sequence_parallel_size>1` | 只在单条序列长到装不下时有用；这里 seq 均长 ~1.9k、已过滤 ≤16k | ❌ 不适用 |
+| `param_offload` / `optimizer_offload` | 拿速度换显存，方向相反 | ❌ |
+
+**为什么提高 token 预算没用（反直觉）。** Liger 省下的显存本想用来把预算从 65536 提到
+98304，让每卡 micro-batch 从 2 个降到 1 个 —— 那才是真减少通信次数。但实测 98304 直接
+贴到 87 GB，单步 9 分钟都跑不完（同 §5b.6 bs=5120 的失败签名）。省下的 ~6 GB
+（79.7→73.7）远不够多装半个 micro-batch，**这条路被显存堵死了**。
+
+注意 Liger 只 fuse swiglu / rmsnorm / rope / cross_entropy：
+`fused_linear_cross_entropy` 被 verl 强制关掉（`transformer_impl.py:282`，与它的
+forward patching 冲突），所以那个 `[T, 151936]` 的 logits 张量还在（T=65536 时 18.5 GB）。
+上表测的就是 verl 的真实口径。
+
+### 5b.7a ⚠️ 两个量测陷阱（都踩过，都会得出错误结论）
+
+**1. `tail -1` 抓 MFU 会落在预热区。** step 1–5 是 0.19~0.22，step 6 起才稳定
+0.30~0.40。我据此误判过「64 卡 MFU 只有 0.2」。判断 MFU 必须掐掉前 5 步。
+
+**2. tqdm 的 `s/it` 是累计均值，不是瞬时步时。** 进度条上的 `109 s/it` 里还混着启动的
+慢步；同一个 run 的稳定期瞬时值是 60~65 s/it。我据此把 Liger 的收益算成了 +95%，
+实际只有 +6%~12%。要瞬时值就看相邻两行进度条的**时间差**，或直接用 MFU。
+
+**结论：一个 epoch 约 6.5 天**（10000 步 × 56 s），不是早先估计的 12.6 天 —— 那个数字
+同时踩了上面两个陷阱。
+
+### 5b.8 其它几个已确认的点
+
+- **`MAX_TOKEN_LEN_PER_GPU=65536`**（= 4×`max_length`）是有意的：等于 `max_length` 时每次
+  forward 只有 ~1 条序列，FSDP 一整轮通信换很少的计算（实测 51.7 s/step、11.4 GB
+  allocated 但 55.8 GB reserved）。65536 在 205 步 × 32 ranks 下**一次 OOM 都没有**，所以
+  MOPD 那套 adaptive token budget（OOM 时缩预算重试）**没有移植** —— 承载它的
+  `transformer_impl.py` 在两仓库已分化 657 行，收益不抵风险。数据已离线过滤到 ≤16384，
+  长尾 OOM 的风险源在离线阶段就消除了。
+- **`data.truncation=error`**：数据已过滤，再出现超长样本就该失败，以暴露 tokenizer /
+  chat template / 数据版本漂移，而不是静默截断。
+- **`data.ignore_input_ids_mismatch` 必须保持 `false`**：`dataset.py::sanity_check` 只豁免
+  逐轮 fallback 的行；这个开关是全局的，会连 prefix 路径一起关掉，而那是真实
+  tokenization bug 的唯一探测器。
+- **`Prefix render is not monotonic` 警告可以忽略**：Qwen3 模板会重写尾轮 assistant 的空
+  `<think>` 占位符，使前缀不再单调；dataset 检测到后只对该行降级为逐轮 tokenization，不
+  终止训练、不跳过样本、不丢 reasoning、不让 user token 参与 loss。
+- **eos 契约**：Qwen3-4B-Base 出厂 `generation_config.eos_token_id=151643`
+  (`<|endoftext|>`)，但 chat template 用 `<|im_end|>` (151645) 收尾。verl 每次 save 都逐字
+  拷贝 base 的 `generation_config`，所以没修的话每个 checkpoint 都宣称一个它永不发出的停止
+  符（MOPD 实测 324 条 rollout 跑到 30000 token 上限，不报错）。base 目录已修成
+  `[151645, 151643]`，`run_sft_multinode.sh` 启动前会门禁校验。
+- **checkpoint 存 `["model","optimizer","extra","hf_model"]`**，不是 MOPD 的只存
+  `hf_model`：多天的 run 必须能 `resume_mode=auto`（需要 optimizer + extra），只存 hf_model
+  的话一次崩溃就从头再来。代价约 56 GB/ckpt。
+- **中途评测**：MOPD 的 `eval_watcher.py`（轮询 checkpoint 在另一批卡上跑小片 benchmark）
+  **没有移植** —— 8 台机器全被训练占满，没有空闲卡。改为用现成的 `run_eval_experts.sh`
+  对已落盘的 `global_step_N/huggingface` 做离线评测。
+
+---
+
 ## 6. Checkpoint 的存法（Merge 的前置条件）
 
 ### 存的是什么
@@ -658,4 +888,4 @@ actor_rollout_ref.actor.checkpoint.save_contents='["model"]'
 
 一次跑通的 AIME2025 冒烟结果（base，`VAL_N=4`、`MAX_RESPONSE_LENGTH=4096`）：
 `mean@4 = 0.317`。注意该次 response 均长 3468 已接近 4096 上限，
-**被截断压低了分数**，正式评测用默认 16384。
+**被截断压低了分数**，正式评测用默认 24576。

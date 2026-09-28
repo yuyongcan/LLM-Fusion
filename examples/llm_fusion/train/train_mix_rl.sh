@@ -39,12 +39,31 @@ fi
 # ---- optimisation ----
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-128}
+# 5120 covers 100% of the Mix training set and 100% of the eval suite. Measured
+# prompt lengths after the chat template (p99 / max): Math 732 / 2072,
+# Science 633 / 1566, Code 1634 / 6223, IF 975 / 3661, Agent 4171 / 4177; the eval
+# sets top out at 4873 (BFCL v3) and 2819 (one GPQA item).
+# `truncation='error'` means an overlong prompt aborts the run rather than being
+# cut, so filter_overlong_prompts below drops the Code outliers at load instead.
+#
+# ⚠️ Do not lower this to ~2048 on the strength of the text-only lengths. The
+# Agent rows' prompts carry their tool schemas (27 per row for Agent, 18-39 for
+# BFCL v3), which is ~4k tokens on its own -- so 2048 rejects 100% of the Agent
+# domain and all of BFCL v3, and `filter_overlong_prompts` then empties the
+# dataset entirely (num_samples=0 at the sampler).
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-5120}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-24576}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 USE_KL_LOSS=${USE_KL_LOSS:-True}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 NORM_ADV_BY_STD_IN_GRPO=${NORM_ADV_BY_STD_IN_GRPO:-FALSE}
+# How token losses are pooled into one scalar. token-mean pools every token in the
+# batch into one mean, so each token weighs the same and a long chain of thought
+# contributes in proportion to its length. seq-mean-token-mean averages within each
+# sequence first, then across sequences, so every rollout counts once regardless of
+# length -- in a five-domain mixture that equalises the domains rather than the
+# tokens. Set explicitly to compare.
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
 
 # ---- rollout ----
 ROLLOUT_TP=${ROLLOUT_TP:-1}
@@ -58,7 +77,7 @@ MAX_TOOL_RESPONSE_LENGTH=${MAX_TOOL_RESPONSE_LENGTH:-2048}
 MULTITURN_FORMAT=${MULTITURN_FORMAT:-hermes}
 
 # ---- bookkeeping ----
-PROJECT_NAME=${PROJECT_NAME:-llm_fusion}
+PROJECT_NAME=${PROJECT_NAME:-llm_fusion_repro}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-mix_rl_qwen3_4b}
 SAVE_FREQ=${SAVE_FREQ:-50}
 TEST_FREQ=${TEST_FREQ:-25}
@@ -81,7 +100,7 @@ DATA=(
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.shuffle=True
-    data.filter_overlong_prompts=False
+    data.filter_overlong_prompts=True
     data.truncation='error'
     data.return_raw_chat=True
 )
@@ -98,6 +117,7 @@ ACTOR=(
     actor_rollout_ref.actor.use_kl_loss=${USE_KL_LOSS}
     actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF}
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.loss_agg_mode=${LOSS_AGG_MODE}
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768

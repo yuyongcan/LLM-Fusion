@@ -233,8 +233,16 @@ class SFTTrainer:
         dp_rank = self.engine.get_data_parallel_rank()
         dp_size = self.engine.get_data_parallel_size()
 
+        # A dataset may have already loaded a disjoint shard for this global rank to avoid
+        # materializing the full dataset in every process. Do not divide such a shard by the
+        # data-parallel world size again; its __len__ is padded equally across ranks.
+        train_is_rank_sharded = getattr(self.train_dataset, "rank_sharded", False)
         self.train_sampler = DistributedSampler(
-            self.train_dataset, shuffle=True, num_replicas=dp_size, rank=dp_rank, drop_last=True
+            self.train_dataset,
+            shuffle=True,
+            num_replicas=1 if train_is_rank_sharded else dp_size,
+            rank=0 if train_is_rank_sharded else dp_rank,
+            drop_last=True,
         )
 
         self.global_batch_size = config.data.train_batch_size
@@ -253,8 +261,13 @@ class SFTTrainer:
         )
 
         if self.val_dataset:
+            val_is_rank_sharded = getattr(self.val_dataset, "rank_sharded", False)
             self.val_sampler = DistributedSampler(
-                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=True
+                self.val_dataset,
+                shuffle=False,
+                num_replicas=1 if val_is_rank_sharded else dp_size,
+                rank=0 if val_is_rank_sharded else dp_rank,
+                drop_last=True,
             )
             self.val_dataloader = StatefulDataLoader(
                 dataset=self.val_dataset,

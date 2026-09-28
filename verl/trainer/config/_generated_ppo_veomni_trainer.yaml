@@ -430,13 +430,15 @@ data:
   prompt_key: prompt
   reward_fn_key: data_source
   max_prompt_length: 512
-  max_response_length: 512
+  max_response_length: 24576
   train_batch_size: 1024
   val_batch_size: null
   tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
     null}
   function_tool_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.function_tool_path,
     null}
+  default_agent_loop: ${oc.select:actor_rollout_ref.rollout.agent.default_agent_loop,
+    single_turn_agent}
   return_raw_input_ids: false
   return_raw_chat: true
   return_full_prompt: false
@@ -761,9 +763,15 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: false
+    metric: null
+    max_num_gen_batches: 0
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
+  mode: vllm
   distillation_loss:
     _target_: verl.workers.config.DistillationLossConfig
     loss_mode: k3
@@ -777,6 +785,15 @@ distillation:
     clip_ratio: 0.2
     clip_ratio_low: 0.2
     clip_ratio_high: 0.2
+    reward_extrapolation_lambda: 1.0
+    rep_coef: 0.0
+    rep_layers:
+    - 9
+    - 18
+    - 27
+    - 36
+    rep_last_k: 2000
+    rep_normalize: true
   n_gpus_per_node: 8
   nnodes: 0
   teacher_models:

@@ -27,7 +27,23 @@ lr_warmup_steps: -1
 betas: [0.9, 0.999]
 
 # Clip gradient
-clip_grad: 1.0
+# Upstream's 1.0 never binds here: across every run in this project the actor's
+# grad_norm sits around 0.02 (median) with a p90 of 0.05, so clipping at 1.0 is
+# 50x above the working range and passes spikes through untouched.
+#
+# expert_math_qwen3_4b_4x8 collapsed that way (2026-09-11). Steps 255-259 spiked
+# to 0.37 / 0.81 / 0.55 / 0.67 while the score still looked healthy at 0.53;
+# entropy then fell monotonically and generations degenerated into repetition
+# loops that ran to max_response_length and scored 0 for want of a \boxed answer
+# -- 98% of rollouts by step 285, score 0.000. The same recipe at 8x8 never
+# exceeded grad_norm 0.111 and finished its 300 steps, so the collapse is a
+# stability margin, not a wrong hyper-parameter.
+#
+# 0.2 clips those spikes while leaving the RL working range (p90 0.05) alone.
+# ⚠️ MOPD distillation runs a full order of magnitude higher (median 0.09-0.11,
+# p90 0.30-0.62) and did not collapse, so this bound does trim some of their
+# legitimate steps. Raise it per-run if a distillation job needs the headroom.
+clip_grad: 0.2
 
 # Minimum LR ratio for cosine schedule
 min_lr_ratio: 0.0

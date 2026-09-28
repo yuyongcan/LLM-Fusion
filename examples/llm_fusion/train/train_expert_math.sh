@@ -47,12 +47,20 @@ fi
 # ---- optimisation ----
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-128}
+# 5120 covers 100% of the training data and 100% of the eval suite; the measured
+# per-domain distribution, and why a lower value empties the Agent domain, are
+# documented in train_mix_rl.sh. `truncation='error'` aborts on an overlong prompt
+# rather than cutting it, so filter_overlong_prompts below drops the handful of
+# outliers at load time instead.
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-5120}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-24576}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 USE_KL_LOSS=${USE_KL_LOSS:-True}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 NORM_ADV_BY_STD_IN_GRPO=${NORM_ADV_BY_STD_IN_GRPO:-FALSE}
+# Pool every token in the batch into one mean, so each token weighs the same
+# regardless of which rollout produced it; see the note in train_mix_rl.sh.
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
 
 # ---- rollout ----
 ROLLOUT_TP=${ROLLOUT_TP:-1}
@@ -66,7 +74,7 @@ MAX_TOOL_RESPONSE_LENGTH=${MAX_TOOL_RESPONSE_LENGTH:-2048}
 MULTITURN_FORMAT=${MULTITURN_FORMAT:-hermes}
 
 # ---- bookkeeping ----
-PROJECT_NAME=${PROJECT_NAME:-llm_fusion}
+PROJECT_NAME=${PROJECT_NAME:-llm_fusion_repro}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-expert_math_qwen3_4b}
 SAVE_FREQ=${SAVE_FREQ:-25}
 TEST_FREQ=${TEST_FREQ:-25}
@@ -86,7 +94,7 @@ DATA=(
     data.train_batch_size=${TRAIN_BATCH_SIZE}
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
-    data.filter_overlong_prompts=False
+    data.filter_overlong_prompts=True
     data.truncation='error'
     data.return_raw_chat=True
 )
@@ -103,6 +111,7 @@ ACTOR=(
     actor_rollout_ref.actor.use_kl_loss=${USE_KL_LOSS}
     actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF}
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.loss_agg_mode=${LOSS_AGG_MODE}
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`verl/` is the main Python package, with trainers, workers, model backends, utilities, and Hydra YAML configuration. The paper-specific workflow lives in `examples/llm_fusion/`: `train/` launches expert, Mix RL, and MOPD runs; `eval/` evaluates checkpoints; `merge/` converts and combines experts; and `paths.sh` centralizes data and output roots. General maintenance utilities are in `scripts/`, container definitions in `docker/`, images in `assets/`, and the vendored merge implementation in `third_party/MergeLM/`. Tests are grouped by component under `tests/`, with hardware-heavy suites under `special_distributed`, `special_e2e`, and `special_npu`.
+`verl/` is the main Python package, with trainers, workers, model backends, utilities, and Hydra YAML configuration. The paper-specific workflow lives in `examples/llm_fusion/`: `sft/` builds the phase-1 chat model from Qwen3-4B-Base; `train/` launches expert, Mix RL, and MOPD runs; `eval/` evaluates checkpoints; `merge/` converts and combines experts; and `paths.sh` centralizes data and output roots. General maintenance utilities are in `scripts/`, container definitions in `docker/`, images in `assets/`, and the vendored merge implementation in `third_party/MergeLM/`. Tests are grouped by component under `tests/`, with hardware-heavy suites under `special_distributed`, `special_e2e`, and `special_npu`.
 
 ## Build, Test, and Development Commands
 

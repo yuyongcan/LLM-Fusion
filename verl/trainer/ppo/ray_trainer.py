@@ -184,6 +184,61 @@ def compute_spec_decode_metrics(
     }
 
 
+def compute_group_keep_mask(scores: np.ndarray, uids: np.ndarray) -> tuple[np.ndarray, dict[str, float]]:
+    """Mark the rows belonging to prompt groups that carry a usable gradient.
+
+    A group is every row sharing a `uid`, i.e. the `rollout.n` samples drawn for one
+    prompt. GRPO normalizes the advantage within the group, so when every sample in a
+    group earns the same score the advantage is identically zero and the group teaches
+    the policy nothing -- having cost a full rollout to produce.
+
+    Groups are kept or dropped whole. Keeping part of one would leave the surviving
+    rows to be normalized against a truncated group, and a group of one has zero std,
+    which `compute_grpo_outcome_advantage`'s epsilon turns into a zero advantage
+    without raising -- the same waste as before, only now invisible.
+
+    Args:
+        scores: Per-sample scalar score, one entry per row.
+        uids: Group id per row; rows sharing a uid form one group.
+
+    Returns:
+        A boolean mask over rows (True = keep), and stats describing what was dropped:
+        group counts plus the all-wrong / all-right split, which says whether the waste
+        comes from prompts that are too hard or from ones the policy has already
+        mastered -- a distinction that calls for opposite fixes to the data mix.
+    """
+    if len(scores) != len(uids):
+        raise ValueError(f"scores and uids must be parallel, got {len(scores)} vs {len(uids)}")
+
+    keep = np.zeros(len(scores), dtype=bool)
+    stats = {"groups_total": 0, "groups_kept": 0, "groups_all_wrong": 0, "groups_all_right": 0}
+    if len(scores) == 0:
+        return keep, stats
+
+    rows_by_uid = defaultdict(list)
+    for row, uid in enumerate(uids):
+        rows_by_uid[uid].append(row)
+
+    for rows in rows_by_uid.values():
+        group = scores[rows]
+        stats["groups_total"] += 1
+        # Comparing the group's own extremes rather than thresholding a std keeps this
+        # exact at any score scale, including non-binary rewards.
+        if group.min() != group.max():
+            stats["groups_kept"] += 1
+            keep[rows] = True
+        elif group[0] <= 0.0:
+            # Splitting the dropped groups at zero assumes a reward where 0 means "no
+            # credit", which holds for every scorer in this project. A reward that can
+            # go negative would land those groups in all_wrong too; that only skews
+            # these two diagnostic counters, never the mask.
+            stats["groups_all_wrong"] += 1
+        else:
+            stats["groups_all_right"] += 1
+
+    return keep, stats
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
@@ -369,6 +424,8 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
+
+        self._validate_filter_groups_config()
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -1259,6 +1316,176 @@ class RayPPOTrainer:
             dp_rank_mapping = worker_group._dispatch_info[role]
         return max(dp_rank_mapping) + 1
 
+    def _validate_filter_groups_config(self):
+        """Reject the setups DAPO dynamic sampling cannot serve, before any GPU is booked.
+
+        Each of these would otherwise fail deep inside a rollout round, minutes in and
+        with a message pointing somewhere else entirely.
+        """
+        filter_groups = self.config.algorithm.get("filter_groups", None)
+        if filter_groups is None or not filter_groups.get("enable", False):
+            return
+
+        if self.use_rm:
+            # The reward model shares the rollout GPUs: scoring sleeps the engine and
+            # resyncs weights to swap the RM in. Per rollout round that is a full weight
+            # resync, which costs more than the rollouts the filter saves.
+            raise NotImplementedError(
+                "algorithm.filter_groups.enable is not supported together with a reward "
+                "model (reward.reward_model.enable=True). Dynamic sampling needs the "
+                "rollout engine to stay resident across resampling rounds, but colocated "
+                "reward-model scoring sleeps it and resyncs weights on every round."
+            )
+
+        skip_cfg = self.config.get("skip", None)
+        for name in ("rollout", "async_rollout"):
+            sub = skip_cfg.get(name, None) if skip_cfg is not None else None
+            if sub is not None and sub.get("enable", False):
+                # The cache is keyed by global_steps, which does not change between
+                # resampling rounds -- so round 2 would replay round 1's generations,
+                # reproduce the same zero-variance groups, and never converge.
+                raise NotImplementedError(
+                    f"algorithm.filter_groups.enable is not supported together with "
+                    f"skip.{name}.enable. The rollout cache is keyed by global_steps, "
+                    f"which is identical across resampling rounds, so every round would "
+                    f"replay the same generations and the batch would never fill."
+                )
+
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        if rollout_n < 2:
+            raise ValueError(
+                f"algorithm.filter_groups.enable requires actor_rollout_ref.rollout.n >= 2 "
+                f"to have any within-group spread to filter on, got {rollout_n}."
+            )
+
+        gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
+        if gen_batch_size < self.config.data.train_batch_size:
+            raise ValueError(
+                f"data.gen_batch_size ({gen_batch_size}) < data.train_batch_size "
+                f"({self.config.data.train_batch_size}). Dynamic sampling only ever removes "
+                f"groups, so a gen batch smaller than the train batch just adds rounds."
+            )
+
+    def _filter_metric_scores(self, batch: DataProto) -> np.ndarray:
+        """Per-sample scalar that dynamic sampling compares within each prompt group.
+
+        `algorithm.filter_groups.metric` names a key in `non_tensor_batch` (the reward
+        managers publish "acc" there); leaving it null sums the token-level `rm_scores`,
+        which every scorer produces. A configured key that is missing is an error rather
+        than a silent fallback: falling back would filter on a different quantity than
+        asked for and still look healthy in the logs.
+        """
+        metric = self.config.algorithm.filter_groups.get("metric", None)
+        if metric:
+            if metric in batch.non_tensor_batch:
+                return np.asarray(batch.non_tensor_batch[metric], dtype=np.float64)
+            if batch.batch is not None and metric in batch.batch.keys():
+                return batch.batch[metric].detach().cpu().float().numpy()
+            available = sorted(batch.non_tensor_batch.keys())
+            raise ValueError(
+                f"algorithm.filter_groups.metric={metric!r} is not in the batch. "
+                f"Available non_tensor_batch keys: {available}. "
+                f"Use metric=null to filter on the summed rm_scores instead."
+            )
+        return batch.batch["rm_scores"].sum(dim=-1).detach().cpu().float().numpy()
+
+    def _accumulate_filtered_batch(
+        self, batch: DataProto, rollout_n: int, metrics: dict
+    ) -> tuple[DataProto, torch.Tensor, bool]:
+        """Keep only prompt groups that carry a gradient, accumulating until a full batch.
+
+        Returns the batch to train on, its reward tensor, and whether to proceed. When it
+        returns False the caller must `continue` to draw another gen batch; the survivors
+        so far are held in `self._filter_buffer`.
+
+        The batch handed back always holds exactly `data.train_batch_size * rollout_n`
+        rows. That is not merely tidy: the worker-side `make_iterator` asserts the row
+        count divides by `ppo_mini_batch_size * rollout_n`, `chunk_tensordict` asserts it
+        divides by the dp size, and `_balance_batch` asserts the same -- and none of the
+        config-time batch-size checks run under `use_dynamic_bsz`, so a short batch would
+        surface as one of those asserts, far from the real cause.
+        """
+        scores = self._filter_metric_scores(batch)
+        uids = batch.non_tensor_batch["uid"]
+        keep_mask, stats = compute_group_keep_mask(scores, uids)
+
+        kept = batch.select_idxs(keep_mask)
+        # meta_info is shared by reference out of select_idxs and differs between rounds
+        # (global_steps, global_token_num, ...). DataProto.concat asserts that overlapping
+        # non-metric keys are equal, so strip it here and restore it from the final batch.
+        kept.meta_info = {}
+        self._filter_buffer.append(kept)
+        self._filter_num_gen_batches += 1
+
+        groups_needed = self.config.data.train_batch_size
+        groups_have = sum(len(d) for d in self._filter_buffer) // rollout_n
+
+        max_rounds = self.config.algorithm.filter_groups.get("max_num_gen_batches", 0)
+        if groups_have < groups_needed:
+            if 0 < max_rounds <= self._filter_num_gen_batches:
+                self._filter_buffer = []
+                self._filter_num_gen_batches = 0
+                raise RuntimeError(
+                    f"algorithm.filter_groups: only {groups_have} of {groups_needed} prompt "
+                    f"groups survived filtering after {max_rounds} gen batches. Every other "
+                    f"group scored identically across all {rollout_n} rollouts, so it carries "
+                    f"no gradient. Raise data.gen_batch_size, raise max_num_gen_batches, or "
+                    f"use training data better matched to the policy's current ability."
+                )
+            return batch, None, False
+
+        if len(self._filter_buffer) > 1:
+            # The agent loop builds some keys conditionally on the content of the round it
+            # is post-processing -- `reward_extra_keys` comes off its *first* sample, and
+            # `multi_modal_inputs` only appears when some row has one. Rounds can therefore
+            # disagree, and concat would then fail inside torch.cat or py_functional with a
+            # message that says nothing about resampling. Check it here instead.
+            first = self._filter_buffer[0]
+            for i, other in enumerate(self._filter_buffer[1:], start=1):
+                for field, a, b in (
+                    ("batch", set(first.batch.keys()), set(other.batch.keys())),
+                    ("non_tensor_batch", set(first.non_tensor_batch), set(other.non_tensor_batch)),
+                ):
+                    if a != b:
+                        self._filter_buffer = []
+                        self._filter_num_gen_batches = 0
+                        raise RuntimeError(
+                            f"algorithm.filter_groups: rollout round {i} produced different "
+                            f"{field} keys than round 0, so the rounds cannot be concatenated. "
+                            f"Only in round 0: {sorted(a - b)}; only in round {i}: {sorted(b - a)}."
+                        )
+            pooled = DataProto.concat(self._filter_buffer)
+        else:
+            pooled = self._filter_buffer[0]
+        self._filter_buffer = []
+
+        # Truncate to whole groups. Rows of a group are contiguous because `batch.repeat`
+        # interleaves, and concat preserves order, so a plain prefix slice keeps groups intact.
+        pooled = pooled.slice(0, groups_needed * rollout_n)
+        pooled.meta_info = dict(batch.meta_info)
+
+        # Measured on the last round *before* filtering. This matters: once filtering is
+        # on, `grpo/group_zero_var/frac` is ~0 by construction because the zero-variance
+        # groups are gone from the trained batch, so these are the only remaining view of
+        # how much of the raw rollout is being wasted.
+        #
+        # Also note `timing_per_token_ms/gen` and `perf/throughput` normalize by the
+        # trained batch while `timing_s/gen` sums every round, so they read high by roughly
+        # `filter/num_gen_batches`; divide by it to compare against a non-filtered run.
+        total = max(stats["groups_total"], 1)
+        metrics.update(
+            {
+                "filter/num_gen_batches": self._filter_num_gen_batches,
+                "filter/keep_ratio": stats["groups_kept"] / total,
+                "filter/all_wrong_ratio": stats["groups_all_wrong"] / total,
+                "filter/all_right_ratio": stats["groups_all_right"] / total,
+                "filter/groups_kept": stats["groups_kept"],
+                "filter/groups_total": stats["groups_total"],
+            }
+        )
+        self._filter_num_gen_batches = 0
+        return pooled, pooled.batch["rm_scores"], True
+
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
         """Reorder the data on single controller such that each dp rank gets similar total tokens.
 
@@ -1607,12 +1834,24 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
+        # DAPO dynamic sampling state. Both stay empty and unused when disabled; the
+        # buffer carries kept groups across dataloader batches within one training step.
+        filter_groups_cfg = self.config.algorithm.get("filter_groups", None)
+        filter_groups_enabled = bool(filter_groups_cfg is not None and filter_groups_cfg.get("enable", False))
+        self._filter_buffer = []
+        self._filter_num_gen_batches = 0
+
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
-                metrics = {}
-                timing_raw = {}
+                # A non-empty buffer means the previous dataloader batch was filtered down
+                # and this one continues the same training step, so metrics and timings are
+                # kept to cover every rollout round that step consumed. `marked_timer`
+                # accumulates (`timing_raw[name] += ...`), so the rounds sum on their own.
+                if not self._filter_buffer:
+                    metrics = {}
+                    timing_raw = {}
 
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(
@@ -1656,7 +1895,13 @@ class RayPPOTrainer:
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
                         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
-                        self.checkpoint_manager.sleep_replicas()
+                        if not filter_groups_enabled:
+                            # Frees the rollout weights and KV cache (sleep level 2). Nothing
+                            # wakes the engine again until update_weights() after the actor
+                            # update, so with dynamic sampling this has to wait until the
+                            # accumulation is done -- otherwise a second rollout round would
+                            # generate against a sleeping engine. Deferred below instead.
+                            self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
 
@@ -1687,11 +1932,16 @@ class RayPPOTrainer:
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
+
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
-                    if self.config.trainer.balance_batch:
+                    #
+                    # With dynamic sampling this waits until the batch is final: balancing
+                    # rows that are about to be filtered out both wastes the work and
+                    # leaves the survivors unbalanced.
+                    if self.config.trainer.balance_batch and not filter_groups_enabled:
                         self._balance_batch(batch, metrics=metrics)
 
                     # compute global_valid tokens
@@ -1711,6 +1961,38 @@ class RayPPOTrainer:
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+
+                    if filter_groups_enabled:
+                        # DAPO dynamic sampling. Drop the prompt groups whose rollouts all
+                        # scored the same -- GRPO gives them a zero advantage, so they cost
+                        # a full rollout and teach nothing -- and keep drawing gen batches
+                        # until a full train_batch_size of useful groups has accumulated.
+                        batch, reward_tensor, keep_training = self._accumulate_filtered_batch(
+                            batch, rollout_n=rollout_n, metrics=metrics
+                        )
+                        if not keep_training:
+                            # Not enough surviving groups yet. `continue` lands before the
+                            # step counter and progress bar at the end of this loop body,
+                            # so the next dataloader batch extends this same training step.
+                            # The rollout engine is deliberately left awake for that round.
+                            continue
+
+                        # Batch is final, so the rollout engine can release its memory --
+                        # the deferred half of the branch up in the "gen" timer.
+                        with marked_timer("gen", timing_raw, color="red"):
+                            self.checkpoint_manager.sleep_replicas()
+
+                        # reward_extra_infos_dict was read off the pre-filter batch; re-read
+                        # it so the per-sample arrays line up with the rows that survived.
+                        _, reward_extra_infos_dict = extract_reward(batch)
+
+                        if self.config.trainer.balance_batch:
+                            self._balance_batch(batch, metrics=metrics)
+                        # Recompute now that the rows are final; the value from before the
+                        # filter describes a batch that no longer exists.
+                        batch.meta_info["global_token_num"] = torch.sum(
+                            batch.batch["attention_mask"], dim=-1
+                        ).tolist()
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)

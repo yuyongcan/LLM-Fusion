@@ -79,6 +79,10 @@ policy_loss:
 clip_ratio_c: 3.0
 
 # Loss aggregation mode: "token-mean", "seq-mean-token-sum", "seq-mean-token-mean", or "seq-mean-token-sum-norm"
+# token-mean pools every token in the batch into one mean, so each token carries
+# the same weight and long generations contribute proportionally to their length.
+# seq-mean-token-mean instead averages within each sequence first, which makes a
+# rollout's weight independent of its length.
 loss_agg_mode: token-mean
 
 # Scale factor for "seq-mean-token-sum-norm" loss aggregation mode.

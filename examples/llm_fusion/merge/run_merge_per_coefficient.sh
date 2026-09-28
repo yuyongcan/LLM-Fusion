@@ -52,7 +52,7 @@ COEF_SCIENCE=${COEF_SCIENCE:-1.0}
 COEF_IF=${COEF_IF:-1.2}
 COEF_AGENT=${COEF_AGENT:-1.0}
 
-SAVE_DTYPE=${SAVE_DTYPE:-bfloat16}
+SAVE_DTYPE=${SAVE_DTYPE:-float32}
 
 # Order is math, code, science, if, agent -- the order run_merge.sh uses for the
 # released checkpoints. The merge itself is symmetric, but the two lists below
