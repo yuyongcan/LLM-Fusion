@@ -14,7 +14,6 @@ except ImportError:
     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
 
 
-_SOLUTION_CLIP_CHARS = 300
 _pool = None
 _pool_lock = threading.Lock()
 
@@ -69,8 +68,13 @@ def _verify_in_subprocess(ground_truth_boxed: str, model_output: str) -> float:
     gold_targets = (LatexExtractionConfig(),)
     pred_targets = (ExprExtractionConfig(), LatexExtractionConfig())
 
-    clipped_model_output = model_output[-_SOLUTION_CLIP_CHARS:]
-    last_boxed = last_boxed_only_string(clipped_model_output)
+    # Search the whole output, not a trailing window. last_boxed_only_string already
+    # scans backwards with rfind, so it returns the *last* \boxed either way -- clipping
+    # added no correctness, only a failure mode: a model that emits a correct
+    # \boxed{...} and then appends a verification paragraph (common for thinking models)
+    # had its answer sliced off and scored 0. Measured on the AIME'25 dump, 7/180 (3.9%)
+    # of boxed answers sat more than the old 300-char window from the end.
+    last_boxed = last_boxed_only_string(model_output)
     extracted_gold = parse(ground_truth_boxed, gold_targets)
     extracted_pred = parse(last_boxed or "", pred_targets)
     if extracted_gold and extracted_pred:

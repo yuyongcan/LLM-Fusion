@@ -17,7 +17,6 @@ except ImportError:
 
 logging.getLogger("math_verify").setLevel(logging.ERROR)
 
-_SOLUTION_CLIP_CHARS = 300
 _pool = None
 _pool_lock = threading.Lock()
 
@@ -85,7 +84,12 @@ def _compute_score_in_subprocess(model_output: str, ground_truth: str) -> float:
         pred_extraction_target=(StringExtractionConfig(strings=options),),
     )
 
-    truncated_model_output = last_boxed_only_string(model_output[-_SOLUTION_CLIP_CHARS:])
+    # Search the whole output, not a trailing window -- same fix as math_verify_enhanced.
+    # last_boxed_only_string already scans backwards with rfind, so clipping bought no
+    # correctness and only discarded correct answers followed by a verification
+    # paragraph. Measured on the GPQA dump, 104/2142 (4.9%) of boxed answers sat more
+    # than the old 300-char window from the end and scored 0.
+    truncated_model_output = last_boxed_only_string(model_output)
     truncated_model_output = remove_boxed(truncated_model_output)
     score, _ = verify_func([ground_truth], [truncated_model_output])
     return score
