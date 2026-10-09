@@ -107,6 +107,8 @@ TEACHER_TAG=${TEACHER_TAG:-$(basename "${TEACHER_MODEL}" \
     | sed -e 's/^task_arithmetic_scaling_coefficient_/ta/' \
           -e 's/^task_arithmetic_percoef_.*/percoef/' \
           -e 's/^task_arithmetic_/ta_/')}
+# ⚠️ 在赋默认值之前先记下「外部有没有显式给过」——KDRL 段要靠它决定要不要自动加后缀。
+EXP_NAME_EXPLICIT=${EXP_NAME_EXPLICIT:-${EXPERIMENT_NAME+x}}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-mopd_merged_${TEACHER_TAG}_qwen3_4b_${NNODES}x${NGPUS_PER_NODE}+${TEACHER_POOL}t}
 CKPT_CONTENTS=${CKPT_CONTENTS:-'["model"]'}
 
@@ -126,6 +128,42 @@ CKPT_CONTENTS=${CKPT_CONTENTS:-'["model"]'}
 #    ExOPD 的 λ>1 会把 log ratio 的尖峰放大，是这三条路里最需要余量的一条。
 # 想试更紧的裁剪：CLIP_GRAD=0.5 bash run_mopd_merged_teacher.sh
 CLIP_GRAD=${CLIP_GRAD:-1.0}
+
+# ---- KDRL（arXiv 2506.02208）----
+# 教师信号的注入方式，两档：
+#   none      (默认) 教师保有自己的 policy loss，各算各的 PPO surrogate 后相加 —— 上游行为
+#   additive  教师信号以 dense token-level advantage 的形式进**同一个** advantage，
+#             A_t = A_hat + beta * (log pi_teacher - log pi_student)，融合后再 clip。
+#             此时教师项记在 distillation/teacher_advantage_* 而不是 distillation/loss。
+#
+# ⚠️ beta 极度 task-sensitive：文献报的值跨两个数量级（逻辑任务 0.2 / 有的 0.02 /
+#    数学 0.002）。从别处搬来的值只能当 ablation 起点。
+#    量级直觉：本作业 teacher_advantage 的 std ≈ 0.48，乘 beta 就是对 advantage 的
+#    扰动量级 —— beta=0.2 约 10%，beta=0.02 约 1%（大概率与 beta=0 分不开）。
+#
+#   KDRL_FUSION=additive KDRL_BETA=0.2 bash run_mopd_merged_teacher.sh
+KDRL_FUSION=${KDRL_FUSION:-none}
+KDRL_BETA=${KDRL_BETA:-0.0}
+KDRL_OVERRIDES=()
+if [ "${KDRL_FUSION}" != "none" ]; then
+    KDRL_OVERRIDES+=(
+        # ⚠️ use_task_rewards 是 KDRL 的硬前提，必须一起打开：教师 advantage 是**加在
+        # RL advantage 上**的，关掉任务奖励就没有可加的 RL 项了，配置校验直接抛
+        #   ValueError: advantage_fusion='additive' (KDRL) requires use_task_rewards=True
+        # 而 train_mopd_single_teacher.sh 里这项默认是 False（纯蒸馏、任务奖励只记指标
+        # 不进损失），光传 advantage_fusion 必炸 —— 2026-09-28 第一次用本开关就是这么挂的。
+        #   副作用：开了它就不是「纯蒸馏」了，与 use_task_rewards=False 的历史 MOPD
+        #   作业不再可直接横比（2026-09-28 那两批 30 步 KDRL 也是 True，与它们可比）。
+        "distillation.distillation_loss.use_task_rewards=True"
+        "distillation.distillation_loss.advantage_fusion=${KDRL_FUSION}"
+        "distillation.distillation_loss.teacher_advantage_coef=${KDRL_BETA}"
+    )
+    # 实验名补 beta 标记：不加的话，两个 beta 的作业会落进同一个 ckpt 目录，
+    # 而那个目录里已有 checkpoint 会被 verl 当成续跑起点（权重从旧步数继续）。
+    if [ -z "${EXP_NAME_EXPLICIT}" ]; then
+        export EXPERIMENT_NAME="${EXPERIMENT_NAME}_kdrl_beta${KDRL_BETA/./p}"
+    fi
+fi
 
 LOG_DIR=${B}/logs/llm_fusion
 mkdir -p "${LOG_DIR}"
@@ -192,6 +230,7 @@ cat <<EOF
   教师模型   : ${TEACHER_MODEL}
   路由       : 无（单教师路径短路 data_source，五个域全发这一个）
   clip_grad  : ${CLIP_GRAD}   (optim/fsdp.yaml 默认 0.2 是按域 RL 定的，蒸馏梯度高一档)
+  KDRL       : fusion=${KDRL_FUSION} beta=${KDRL_BETA}   (none = 上游行为，教师单独一份 policy loss)
   实验名     : ${EXPERIMENT_NAME}
   项目名     : ${PROJECT_NAME}
   logger     : ${LOGGER}   (上游是 wandb，本 Pod 无凭据，已换)
@@ -206,6 +245,7 @@ setsid nohup bash examples/llm_fusion/train/train_mopd_single_teacher.sh \
     "trainer.logger=${LOGGER}" \
     "actor_rollout_ref.actor.checkpoint.save_contents=${CKPT_CONTENTS}" \
     "actor_rollout_ref.actor.optim.clip_grad=${CLIP_GRAD}" \
+    ${KDRL_OVERRIDES[@]+"${KDRL_OVERRIDES[@]}"} \
     "$@" \
     > "${LOG}" 2>&1 < /dev/null & disown
 

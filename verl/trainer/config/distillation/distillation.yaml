@@ -34,14 +34,66 @@ distillation_loss:
   _target_: verl.workers.config.DistillationLossConfig
 
 
-  # Loss function mode for distillation
+  # Loss function mode for distillation.
+  #
+  #   forward_kl_topk  Forward KL over the teacher's top-`topk` tokens, computed in the logits
+  #                    processor so the [T, vocab] loss is never materialised. Mode-covering,
+  #                    and deterministic given the rollout -- it never reads the student's
+  #                    sampled token, so it carries no sampling variance.
+  #                      L_t = sum_k p_T(v_k) * (log p_T(v_k) - log pi_S(v_k))
+  #
+  #   argmax_ce        Cross-entropy against the teacher's single argmax token. Requires
+  #                    topk: 1 and use_policy_gradient=False (config-time checks). Strictly the
+  #                    topk=1 limit of the above with two things taken out, and both are what
+  #                    the mode is for:
+  #                      L_t = -log pi_S(argmax_v p_T(v))
+  #                    * no p_T(argmax) weighting: a teacher that is unsure of its own top
+  #                      choice still contributes at full strength, including positions where
+  #                      the argmax is decided by bf16 rounding in the teacher's forward pass;
+  #                    * no zero clamp: topk=1 stops supervising a position once the student is
+  #                      more confident on the argmax than the teacher is; here the gradient
+  #                      keeps pushing pi_S(argmax) -> 1.
+  #                    Its fixed point is the teacher's greedy decoding, not the teacher's
+  #                    distribution, so it cannot converge to pi_teacher. Fine under greedy
+  #                    evaluation, a liability under sampled evaluation.
+  #
+  #   k1 / k3 / ...    Single-sample KL estimators at the student's sampled token. Reverse KL
+  #                    (mode-seeking), and high variance since they read only one sampled token.
   loss_mode: k3
 
-  # If distillation loss requires top-k logits, this is the value of k
+  # If distillation loss requires top-k logits, this is the value of k.
+  # Must be 1 for loss_mode="argmax_ce".
   topk: 32
 
   # Whether to include task rewards alongside distillation loss.
   use_task_rewards: true
+
+  # How the teacher signal enters the RL update (KDRL, https://arxiv.org/abs/2506.02208).
+  #
+  #   none      (default) the teacher keeps its own policy loss, added to the RL one. Each is
+  #             a PPO surrogate clipped on its own advantage. Bit-for-bit the behaviour from
+  #             before this knob existed.
+  #   additive  the teacher becomes a dense token-level term *inside* the RL advantage, and the
+  #             two run under a single PPO clip:
+  #
+  #               A_t = A_hat + teacher_advantage_coef * (log pi_teacher - log pi_student)
+  #
+  #             These are not two ways of writing the same objective: clipping the sum is not
+  #             the sum of the clips. With one fused advantage the clip decides once, on the
+  #             combined direction, which is what lets the teacher term flip the sign of an
+  #             update the verifier wanted -- the exact property that motivated the
+  #             teacher-modulated variants.
+  #
+  # "additive" requires use_task_rewards=true and an estimator loss_mode (k1, k3, ...), and
+  # reports the teacher term under distillation/teacher_advantage_* rather than
+  # distillation/loss.
+  advantage_fusion: none
+
+  # beta of KDRL: weight of the teacher advantage. Ignored unless advantage_fusion="additive".
+  # ⚠️ Extremely task-sensitive -- reported values span two orders of magnitude (0.2 on some
+  #    logic tasks, 0.02 on others, 0.002 on math). Treat any value carried over from another
+  #    task as a starting point for an ablation, not as a setting.
+  teacher_advantage_coef: 0.0
 
 
   # The coef of the distillation loss when use_task_rewards is true

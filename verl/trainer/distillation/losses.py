@@ -134,13 +134,24 @@ def compute_topk_loss(
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
     """
+    loss_mode = distillation_config.distillation_loss.loss_mode
     match config.strategy:
         # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
         case "fsdp" | "veomni":
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+            distillation_loss_fn = (
+                fsdp_losses.compute_argmax_ce
+                if loss_mode == "argmax_ce"
+                else fsdp_losses.compute_forward_kl_topk
+            )
         case "megatron":
+            if loss_mode == "argmax_ce":
+                raise NotImplementedError(
+                    "loss_mode='argmax_ce' is only implemented for the fsdp/veomni strategy. "
+                    "Add compute_argmax_ce to verl.trainer.distillation.megatron.losses, or use "
+                    "loss_mode='forward_kl_topk' with topk=1."
+                )
             import verl.trainer.distillation.megatron.losses as megatron_losses
 
             distillation_loss_fn = megatron_losses.compute_forward_kl_topk
@@ -205,28 +216,54 @@ def distillation_ppo_loss(
         return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
 
     # Called as final policy loss
-    distillation_loss_config = distillation_config.distillation_loss
-    distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
-    policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
-    if not distillation_loss_config.use_task_rewards:
-        policy_loss = 0.0
+    loss_config = distillation_config.distillation_loss
 
-    # Combine distillation with policy loss
-    policy_metrics.update(distill_metrics)
-    distillation_loss_coef = (
-        distillation_loss_config.distillation_loss_coef if distillation_loss_config.use_task_rewards else 1.0
-    )
-    policy_loss += distill_loss * distillation_loss_coef
-    policy_metrics["distillation/loss"] = Metric(value=distill_loss, aggregation=AggregationType.SUM)
+    if loss_config.advantage_fusion == "additive":
+        # KDRL (https://arxiv.org/abs/2506.02208): the teacher signal enters the *same* advantage
+        # as the verifiable reward, so the two are fused before clipping:
+        #
+        #   A_t = A_hat + beta * (log pi_teacher - log pi_student)
+        #
+        # This is deliberately not the `else` branch with a different coefficient. Below, the RL
+        # loss and the distillation loss are two separate PPO surrogates, each clipped on its own
+        # advantage and then added. Summing two clipped terms is not the same as clipping their
+        # sum: with a single fused advantage the clip decides once, on the combined direction,
+        # which is what lets the teacher term flip the sign of an update that the verifier wanted.
+        # That sign flip is the property the paper isolates -- it is why teacher-modulated
+        # variants exist at all -- so a two-loss implementation is not a stand-in for it.
+        teacher_advantage, teacher_metrics = compute_teacher_advantage(model_output, data)
+        advantages = data["advantages"]
+        if advantages.is_nested:
+            advantages = advantages.to_padded_tensor(0.0)
+        fused_advantages = advantages + loss_config.teacher_advantage_coef * teacher_advantage
+        policy_loss, policy_metrics = ppo_loss(
+            config, model_output, data, dp_group, advantages=fused_advantages
+        )
+        policy_metrics.update(teacher_metrics)
+        # The teacher no longer contributes its own loss term, so distillation/loss is absent by
+        # design. Reading a run's teacher weight from `distillation/teacher_advantage_*` instead.
+    else:
+        distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
+        policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
+        if not loss_config.use_task_rewards:
+            policy_loss = 0.0
+
+        # Combine distillation with policy loss
+        policy_metrics.update(distill_metrics)
+        distillation_loss_coef = (
+            loss_config.distillation_loss_coef if loss_config.use_task_rewards else 1.0
+        )
+        policy_loss += distill_loss * distillation_loss_coef
+        policy_metrics["distillation/loss"] = Metric(value=distill_loss, aggregation=AggregationType.SUM)
 
     # Representation distillation (OPRD), additive on top of whatever the output-space term is.
     # Separate from distillation_loss() above because it does not read log probs at all: it
     # compares hidden states, so it needs model_output's per-layer tensors rather than the
     # teacher's log probs, and it is the one term whose gradient does not pass through the LM
     # head. rep_coef == 0.0 skips it entirely rather than adding a multiplied-by-zero tensor.
-    if distillation_loss_config.rep_coef > 0.0:
-        rep_loss, rep_metrics = compute_representation_loss(distillation_loss_config, model_output, data)
-        policy_loss = policy_loss + rep_loss * distillation_loss_config.rep_coef
+    if loss_config.rep_coef > 0.0:
+        rep_loss, rep_metrics = compute_representation_loss(loss_config, model_output, data)
+        policy_loss = policy_loss + rep_loss * loss_config.rep_coef
         for name, value in rep_metrics.items():
             policy_metrics[name] = Metric(value=value, aggregation=AggregationType.MEAN)
 
@@ -291,6 +328,61 @@ def compute_representation_loss(
         mask,
         normalize=loss_config.rep_normalize,
     )
+
+
+def compute_teacher_advantage(
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """KDRL's per-token teacher advantage, d_t = log pi_teacher(y_t | h_t) - log pi_student(y_t | h_t).
+
+    This is the quantity that on-policy distillation minimises, used here as a dense token-level
+    *reward* rather than as a loss: it is detached, so it reaches the model only through the
+    advantage of the policy-gradient update, never through its own gradient. That is also why the
+    padding positions are zeroed rather than left at whatever the jagged->padded conversion
+    produced -- an advantage is only ever read under ``response_mask``, and a nonzero pad value
+    would corrupt the reported statistics without showing up in the loss.
+
+    Two layouts reach this point, exactly as in ``compute_distillation_loss_reverse_kl_estimator``:
+    the vLLM teacher writes ``teacher_logprobs`` as a jagged tensor over prompt+response during
+    rollout, while the in-process HF teacher writes a plain (bsz, resp_len) tensor already sliced
+    to the response. Both are normalised to (bsz, resp_len) here.
+
+    Returns:
+    - teacher_advantage: (bsz, resp_len), zero outside the response mask.
+    - metrics: diagnostics on the teacher advantage over response tokens only.
+    """
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    teacher_log_probs = data["teacher_logprobs"]
+    if teacher_log_probs.is_nested:
+        teacher_log_probs = no_padding_2_padding(teacher_log_probs, data).squeeze(-1)
+    response_mask = data["response_mask"]
+    if response_mask.is_nested:
+        response_mask = response_mask.to_padded_tensor(False)
+    mask = response_mask.bool()
+    assert teacher_log_probs.shape == student_log_probs.shape == mask.shape, (
+        f"teacher {tuple(teacher_log_probs.shape)}, student {tuple(student_log_probs.shape)} and "
+        f"mask {tuple(mask.shape)} must agree to form a per-token teacher advantage."
+    )
+
+    teacher_advantage = (teacher_log_probs - student_log_probs).detach()
+    teacher_advantage = torch.where(mask, teacher_advantage, torch.zeros_like(teacher_advantage))
+
+    if mask.any():
+        valid = teacher_advantage[mask]
+        metrics = {
+            "distillation/teacher_advantage_mean": Metric(AggregationType.MEAN, valid.mean()),
+            "distillation/teacher_advantage_std": Metric(AggregationType.MEAN, valid.std()),
+            "distillation/teacher_advantage_max": Metric(AggregationType.MAX, valid.max()),
+            "distillation/teacher_advantage_min": Metric(AggregationType.MIN, valid.min()),
+            # Fraction of response tokens the teacher scores above the student. Near 1.0 the
+            # teacher still dominates and beta is mostly shaping; near 0.5 the two have converged
+            # and the term is close to symmetric noise.
+            "distillation/teacher_preferred_frac": Metric(AggregationType.MEAN, (valid > 0).float().mean()),
+        }
+    else:
+        metrics = {}
+    return teacher_advantage, metrics
 
 
 def distillation_loss(
@@ -424,6 +516,81 @@ def compute_forward_kl_topk(
     # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
     distillation_losses = distillation_losses.clamp_min(0.0)
 
+    return distillation_losses, distillation_metrics
+
+
+@register_distillation_loss(DistillationLossSettings(names=["argmax_ce"], use_topk=True))  # type: ignore[arg-type]
+def compute_argmax_ce(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Collect the cross-entropy against the teacher's argmax token, computed in the logits processor.
+
+    Returns:
+    - distillation_losses: (bsz, resp_len), the per-token CE from :func:`compute_topk_loss`.
+    - distillation_metrics: Dictionary of metrics.
+
+    Deliberately *not* sharing the body with :func:`compute_forward_kl_topk`, because the two
+    differ in exactly the two places that decide what the objective converges to:
+
+    * no ``clamp_min(0.0)`` here. That clamp is what stops topk=1 supervising a position once
+      the student is more confident on the argmax than the teacher is; removing it is the whole
+      point of this mode, and sharing code would make it look like an oversight.
+    * ``overlap_ratio`` is normalised by 1 rather than by ``topk``: with a single supervised
+      teacher token it is the argmax-agreement rate, not a coverage fraction.
+    """
+    distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
+    student_mass = no_padding_2_padding(model_output["student_mass"], data)
+    teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
+    overlap_count = model_output.get("overlap_count")
+    overlap_token_advantage = model_output.get("overlap_token_advantage")
+    if overlap_count is not None and overlap_token_advantage is not None:
+        overlap_count = no_padding_2_padding(overlap_count, data)
+        overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
+    assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
+
+    overlap_metrics = {}
+    if overlap_count is not None and overlap_token_advantage is not None:
+        assert overlap_count.shape == overlap_token_advantage.shape == response_mask_bool.shape
+        valid_overlap_count = overlap_count[response_mask_bool]
+        # Exactly one teacher token is supervised, so the ratio is the fraction of response
+        # positions where the student's argmax already matches the teacher's. Near 1.0 the
+        # student has converged onto the teacher's greedy path and this loss has little left
+        # to say; near 0.0 it is doing all the work.
+        overlap_metrics["distillation/overlap_ratio"] = valid_overlap_count.float().mean().item()
+        overlap_position_mask = response_mask_bool & (overlap_count > 0)
+        if overlap_position_mask.any():
+            overlap_metrics["distillation/overlap_token_advantage"] = (
+                overlap_token_advantage[overlap_position_mask].mean().item()
+            )
+        else:
+            overlap_metrics["distillation/overlap_token_advantage"] = 0.0
+
+    # Both masses are the probability on the argmax token, so student_mass / teacher_mass reads
+    # as "how much of the teacher's confidence has the student absorbed". student_mass exceeding
+    # teacher_mass is expected here -- that over-sharpening is what this mode does not prevent.
+    student_mass = student_mass[response_mask_bool]
+    teacher_mass = teacher_mass[response_mask_bool]
+    distillation_metrics = {
+        "distillation/student_mass": student_mass.mean().item(),
+        "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
+        "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
+        "distillation/teacher_mass": teacher_mass.mean().item(),
+        "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
+        "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
+        **overlap_metrics,
+    }
+
+    # CE is non-negative by construction, so unlike the top-k divergence there is nothing to
+    # clamp at zero. An upper bound is still useful -- a token the student assigns ~0
+    # probability would otherwise dominate the step -- and loss_max_clamp in distillation_loss()
+    # already applies one when configured.
     return distillation_losses, distillation_metrics
 
 

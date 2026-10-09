@@ -33,9 +33,22 @@ class DistillationLossConfig(BaseConfig):
     """Configuration for distillation loss settings.
 
     loss_mode (str):
-        Distillation loss function to use.
+        Distillation loss function to use. Three families:
+        - ``forward_kl_topk``: forward KL over the teacher's top-`topk` tokens, computed in the
+          logits processor. Mode-covering, and deterministic given the rollout (no dependence
+          on the student's sampled token, so no sampling variance).
+        - ``argmax_ce``: cross-entropy against the teacher's single argmax token (top-1 only,
+          so `topk` must be 1). This is `forward_kl_topk` at topk=1 with two things removed:
+          the `q = pi_teacher(argmax)` weighting, and the clamp that stops supervising a
+          position once the student is more confident than the teacher. Its fixed point is the
+          teacher's greedy decoding rather than the teacher's distribution, so it is not
+          consistent and cannot converge to pi_teacher -- which is fine when evaluation is
+          greedy and a liability when it is sampled.
+        - ``k1``/``k3``/...: single-sample KL estimators at the student's sampled token. Reverse
+          KL (mode-seeking), and high variance because they only read one sampled token.
     topk (int, optional):
-        Number of top tokens to consider for top-k distillation losses.
+        Number of top tokens to consider for top-k distillation losses. Must be 1 for
+        loss_mode="argmax_ce".
     use_task_rewards (bool):
         Whether to include task rewards alongside distillation loss.
     distillation_loss_coef (float):
@@ -50,6 +63,19 @@ class DistillationLossConfig(BaseConfig):
         by https://thinkingmachines.ai/blog/on-policy-distillation/. Recommended to use loss_mode=k1.
         Otherwise, distillation loss is directly backpropagated as a supervised loss,
         as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3 or forward_kl_topk.
+    advantage_fusion (str):
+        How the teacher signal enters the RL update. "none" (default) keeps it as a second
+        policy loss added to the RL one -- each clipped independently. "additive" instead folds
+        the per-token teacher advantage into the RL advantage and runs a single PPO-clipped
+        surrogate, which is KDRL (https://arxiv.org/abs/2506.02208):
+        A_t = A_hat + teacher_advantage_coef * (log pi_teacher - log pi_student).
+        The distinction is not cosmetic: two independently clipped losses differ from one
+        clipped loss on the summed advantage, and the additive form additionally lets the
+        teacher term flip the sign of the update, which is exactly the failure mode that
+        motivated the teacher-modulated alternatives.
+    teacher_advantage_coef (float):
+        beta of KDRL. Ignored unless advantage_fusion="additive". Reported values span two
+        orders of magnitude across tasks, so this needs a per-task ablation.
     policy_loss_mode (str):
         Name of the policy loss to use when use_policy_gradient is true.
     clip_ratio (float):
@@ -111,6 +137,11 @@ class DistillationLossConfig(BaseConfig):
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.2
 
+    # KDRL (https://arxiv.org/abs/2506.02208): "none" keeps the teacher as a separate policy
+    # loss, "additive" folds it into the RL advantage under a single PPO clip.
+    advantage_fusion: str = "none"
+    teacher_advantage_coef: float = 0.0
+
     # lambda of G-OPD/ExOPD. 1.0 is standard OPD; >1.0 is reward extrapolation.
     reward_extrapolation_lambda: float = 1.0
 
@@ -137,6 +168,36 @@ class DistillationLossConfig(BaseConfig):
 
         self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
 
+        if self.loss_mode == "argmax_ce":
+            # argmax_ce supervises exactly one teacher token, so a larger topk would only make
+            # vLLM materialise (and the batch carry) log probs that are then discarded. Pinning
+            # it also keeps distillation/overlap_ratio interpretable: it is normalised by 1, so
+            # it is the argmax-agreement rate rather than a coverage fraction over k slots.
+            if self.topk != 1:
+                raise ValueError(
+                    f"loss_mode='argmax_ce' supervises only the teacher's top-1 token, so topk "
+                    f"must be 1, got {self.topk}. Use loss_mode='forward_kl_topk' to spread the "
+                    "target over the teacher's top-k."
+                )
+            if self.use_policy_gradient:
+                # Under policy gradient the loss becomes a per-token advantage A_t = -L_t and
+                # the only gradient path is log pi_S(y_t) at the *sampled* token. For an
+                # estimator loss that advantage is log pi_T(y_t) - log pi_S(y_t) -- how much the
+                # teacher likes the token the student chose -- which is what on-policy
+                # distillation means. For argmax_ce it degenerates to log pi_S(a): largest in
+                # magnitude exactly where the student disagrees with the teacher, and ~0 where
+                # it has already matched. The update then reinforces the student's own token
+                # hardest at the positions where it is furthest from the teacher, so the sign of
+                # the distillation is inverted and the reward curve still looks plausible.
+                raise ValueError(
+                    "loss_mode='argmax_ce' requires use_policy_gradient=False. Under policy "
+                    "gradient the per-token advantage becomes log pi_student(argmax_teacher) "
+                    "and the gradient flows only through the sampled token, so the update "
+                    "reinforces the student's own token most strongly where it disagrees with "
+                    "the teacher -- distillation with the sign flipped. Backpropagate the "
+                    "cross-entropy directly instead."
+                )
+
         if self.policy_loss_mode != "vanilla":
             raise NotImplementedError(
                 f"Only vanilla policy loss is currently supported when use_policy_gradient is True, "
@@ -151,7 +212,12 @@ class DistillationLossConfig(BaseConfig):
                 "should move) is largely unused."
             )
 
-        if not self.use_policy_gradient and self.loss_mode == "k1":
+        if not self.use_policy_gradient and self.loss_mode == "k1" and self.advantage_fusion != "additive":
+            # The objection is about backpropagating a k1 *loss*. Under advantage_fusion="additive"
+            # the teacher never becomes a loss: it enters as a detached per-token advantage and
+            # reaches the model only through log pi_theta in the policy gradient, so the missing
+            # teacher dependence is not a defect here. Blocking it would force KDRL users to set
+            # use_policy_gradient=True, a knob this path never reads.
             raise ValueError(
                 "Directly backpropagating k1 loss is incorrect since gradient of k1 loss"
                 " wrt model weights does not depend on teacher log probabilities."
@@ -183,7 +249,57 @@ class DistillationLossConfig(BaseConfig):
                     "and the teacher, i.e. deliberately weaker than the teacher."
                 )
 
+        self._validate_advantage_fusion()
         self._validate_representation_distillation()
+
+    def _validate_advantage_fusion(self) -> None:
+        """Validate how the teacher signal enters the RL update (KDRL)."""
+        if self.advantage_fusion not in ("none", "additive"):
+            raise ValueError(
+                f"advantage_fusion must be 'none' or 'additive', got {self.advantage_fusion!r}."
+            )
+
+        if self.advantage_fusion == "none":
+            if self.teacher_advantage_coef != 0.0:
+                # A beta with the fusion switched off is silently discarded, and every log
+                # line would still claim the teacher was weighted at that value.
+                raise ValueError(
+                    f"teacher_advantage_coef={self.teacher_advantage_coef} has no effect unless "
+                    "advantage_fusion='additive'. Set the fusion mode, or leave the coefficient at 0.0."
+                )
+            return
+
+        # ---- advantage_fusion == "additive" (KDRL) ----
+        if self.teacher_advantage_coef <= 0.0:
+            raise ValueError(
+                f"teacher_advantage_coef={self.teacher_advantage_coef} must be > 0 when "
+                "advantage_fusion='additive'. A non-positive weight would push the student away "
+                "from the teacher on every token."
+            )
+        if not self.use_task_rewards:
+            # Without the RL advantage there is nothing to fuse into: the additive form would
+            # collapse to plain OPD scaled by beta, which is a different algorithm wearing the
+            # same name and would not show up as wrong in any metric.
+            raise ValueError(
+                "advantage_fusion='additive' (KDRL) requires use_task_rewards=True: the teacher "
+                "advantage is added to the RL advantage, so with task rewards off there is no RL "
+                "term to add it to."
+            )
+        if self.loss_settings.use_topk:
+            raise ValueError(
+                f"advantage_fusion='additive' needs a per-token log-prob difference "
+                f"d_t = log pi_teacher - log pi_student, but loss_mode={self.loss_mode!r} is a "
+                "top-k distributional loss. Use an estimator loss such as k1."
+            )
+        if self.reward_extrapolation_lambda != 1.0:
+            # Mathematically these compose -- lambda reshapes d_t, beta weighs it -- but the
+            # combination is untested and the two knobs interact in the same term, so a bad
+            # pairing would be hard to attribute. Refuse rather than guess.
+            raise ValueError(
+                f"advantage_fusion='additive' and reward_extrapolation_lambda="
+                f"{self.reward_extrapolation_lambda} are not validated together. Both act on the "
+                "per-token teacher advantage; validate one at a time."
+            )
 
     def _validate_representation_distillation(self) -> None:
         """Validate the representation-distillation term (OPRD)."""

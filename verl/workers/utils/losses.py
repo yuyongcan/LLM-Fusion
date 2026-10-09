@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+from typing import Optional
+
 import torch
 from tensordict import TensorDict
 
@@ -54,8 +56,22 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
-def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
-    """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+def ppo_loss(
+    config: ActorConfig,
+    model_output,
+    data: TensorDict,
+    dp_group=None,
+    advantages: Optional[torch.Tensor] = None,
+):
+    """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data.
+
+    Args:
+        advantages: optional (bsz, response_length) tensor replacing ``data["advantages"]``.
+            Callers that fuse an extra signal into the advantage (KDRL) pass it here rather than
+            writing into ``data``: ``data`` is a view onto the micro batch shared with every other
+            consumer in the update, and an in-place edit there would leak into the metrics and
+            into later epochs of the same minibatch loop.
+    """
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
@@ -93,7 +109,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
     old_log_prob = data["old_log_probs"]
-    advantages = data["advantages"]
+    if advantages is None:
+        advantages = data["advantages"]
     rollout_is_weights = data.get("rollout_is_weights", None)
 
     loss_agg_mode = config.loss_agg_mode
