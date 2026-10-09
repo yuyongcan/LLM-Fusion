@@ -154,3 +154,9 @@ teacher_experts_fp32/
 research/
 research_hy4/
 *.pdf
+
+# 测试运行时产物（2026-10-09）：tests/utils/dataset/* 里几个用例会在仓库根目录
+# os.makedirs("test_data") 然后往里写 parquet/json，是跑测试的副产物不是源文件。
+test_data/
+# Claude Code 的本机权限设置，逐机不同，不该进仓库。
+.claude/settings.local.json
