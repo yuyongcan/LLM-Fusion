@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Optional
 
 import torch
@@ -61,7 +62,91 @@ from verl.utils.py_functional import convert_nested_value_to_list_recursive
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-__all__ = ["M2RLSFTDataset", "decode_json_field", "normalize_messages"]
+__all__ = [
+    "M2RLSFTDataset",
+    "align_user_prompt",
+    "decode_json_field",
+    "normalize_messages",
+]
+
+#: Suffix the RL datasets and the eval suite append to every math/science question
+#: (``data/LLM-Fusion/train/{Math,Science}``, ``data/LLM-Fusion/test/AIME2025``).
+RL_REASONING_SUFFIX = "\n\nLet's think step by step and output the final answer within \\boxed{}."
+
+#: Wrapper the RL/eval code sets put around every competitive-programming question
+#: (``data/LLM-Fusion/train/Code``, ``test/LCB_v5``). The SFT code mixture carries no
+#: equivalent instruction at all -- measured 0/400 sampled rows -- so here the SFT data
+#: moves toward RL by gaining it, the opposite direction from math/science.
+RL_CODE_PREFIX = (
+    "You will be given a question (problem specification) and will generate a correct "
+    "Python program that matches the specification and passes all tests.\n\nQuestion: "
+)
+RL_CODE_SUFFIX = (
+    "\n\nRead the inputs from stdin solve the problem and write the answer to stdout "
+    "(do not directly test on the sample inputs). Enclose your code within delimiters "
+    "as follows. Ensure that when the python program runs, it reads the inputs, runs "
+    "the algorithm and writes output to STDOUT.```python\n# YOUR CODE HERE\n```"
+)
+
+#: Instruction prefixes the Nemotron SFT mixture puts *before* the question. Each is
+#: stripped and replaced by the RL phrasing. Matching is anchored at the start and
+#: tolerant of the ``\boxed`` -> ``\x08oxed`` (backspace) mangling present in part of the
+#: science split, which is why these are regexes rather than literals.
+_SFT_REASONING_PREFIXES = (
+    # Math-v2: 800/800 sampled rows, verbatim.
+    re.compile(r"^Solve the following math problem\.[^\n]*?inside (?:\\b|\x08)oxed\{\}\.\s*\n+"),
+    # Science-v1 free-form: 191/800. Same sentence without the word "math".
+    re.compile(r"^Solve the following problem\.[^\n]*?inside (?:\\b|\x08)oxed\{\}\.\s*\n+"),
+    # Science-v1 multiple choice: 530/800 across three option-count variants.
+    re.compile(r"^Answer the following multiple choice question\.[^\n]*?\)\.\s*\n+"),
+    re.compile(r"^The following is a multiple-choice question\.[^\n]*?\n+"),
+    re.compile(r"^Help me with this mutliple-choice question\.\s*\n*"),
+)
+
+
+def align_user_prompt(content: str, domain: str) -> str:
+    """Rewrite one SFT question into the phrasing its RL/eval counterpart uses.
+
+    The three stages disagreed on how to ask for an answer: SFT put the format
+    instruction *before* the question, RL and the eval suite append a different one
+    *after* it. Measured on ``Jackwang111/M2RL-SFT``, serving AIME'25 the SFT-style
+    prompt instead of ours moved acc .3208 -> .4500 and cut median response length
+    17630 -> 5524 tokens, because the model only emits ``\\boxed{}`` reliably for the
+    phrasing it was trained on. RL and eval already agree, so SFT is the side that moves.
+
+    ``domain`` comes from the source filename, or is ``"auto"`` for the merged mixture,
+    where the filename says nothing. Under ``"auto"`` only rows whose *own* text starts
+    with a recognised reasoning prefix are rewritten (37.6% of 1000 sampled rows from
+    ``train.le16384.parquet``); everything else -- code, IF, agent, and any unrecognised
+    phrasing -- is left exactly as stored. That asymmetry is deliberate: appending a
+    \\boxed instruction to an IF or agent row would be actively wrong, so "auto" never
+    guesses, it only acts on positive evidence.
+
+    The IF split is excluded even in per-domain mode (its SFT rows carry a system message
+    that RL/eval do not, and IFEval already scores 81.0 against the paper's 79.48).
+    """
+    if domain == "auto":
+        if content.rstrip().endswith(RL_REASONING_SUFFIX.strip()):
+            return content
+        for pattern in _SFT_REASONING_PREFIXES:
+            stripped, n = pattern.subn("", content, count=1)
+            if n:
+                return stripped.rstrip() + RL_REASONING_SUFFIX
+        return content
+    if domain in ("math", "science"):
+        if content.rstrip().endswith(RL_REASONING_SUFFIX.strip()):
+            return content
+        for pattern in _SFT_REASONING_PREFIXES:
+            stripped, n = pattern.subn("", content, count=1)
+            if n:
+                return stripped.rstrip() + RL_REASONING_SUFFIX
+        # No known prefix: still append the suffix so the answer format is requested.
+        return content.rstrip() + RL_REASONING_SUFFIX
+    if domain == "code":
+        if "Enclose your code within delimiters" in content:
+            return content
+        return RL_CODE_PREFIX + content.strip() + RL_CODE_SUFFIX
+    return content
 
 
 def decode_json_field(value: Any) -> Any:
@@ -111,8 +196,48 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+#: Source-filename fragment -> domain, for prompt alignment. Matched case-insensitively
+#: against every parquet path. ``if`` and ``agent`` are intentionally absent: their SFT
+#: and RL phrasings already agree closely enough that rewriting would risk a regression
+#: (see ``align_user_prompt``).
+_DOMAIN_MARKERS = (
+    ("math", "math"),
+    ("competitive-programming", "code"),
+    ("science", "science"),
+)
+
+
+def _infer_domain(parquet_files) -> Optional[str]:
+    """Infer the mixture domain from the source filename(s).
+
+    Returns ``None`` -- meaning "leave prompts alone" -- when the files span more than
+    one domain (e.g. the merged ``train.le16384.parquet``), because a single rewrite rule
+    cannot be correct for all of them. Per-domain runs, which is what
+    ``run_sft_5expert_serial.sh`` does, are the case this supports.
+    """
+    paths = [parquet_files] if isinstance(parquet_files, str) else list(parquet_files)
+    found = set()
+    for path in paths:
+        name = str(path).lower()
+        for marker, domain in _DOMAIN_MARKERS:
+            if marker in name:
+                found.add(domain)
+    if len(found) == 1:
+        return found.pop()
+    # Mixed or unrecognised filename (the merged train.le16384.parquet is both): fall
+    # back to per-row detection rather than giving up, so the merged mixture still gets
+    # its math/science rows aligned. See align_user_prompt's "auto" branch.
+    if len(found) > 1:
+        logger.warning("Mixed domains %s in %s; using per-row prompt alignment.", sorted(found), paths)
+    return "auto"
+
+
 class M2RLSFTDataset(MultiTurnSFTDataset):
     """``MultiTurnSFTDataset`` that preserves ``reasoning_content`` on thinking models."""
+
+    #: Domain whose RL phrasing this dataset's questions are rewritten into, or ``None``
+    #: to leave them as stored. Set in ``_read_files_and_process``.
+    align_domain: Optional[str] = None
 
     _row_tools: Optional[list[dict[str, Any]]] = None
     _row_used_fallback: bool = False
@@ -161,6 +286,14 @@ class M2RLSFTDataset(MultiTurnSFTDataset):
         import numpy as np
         import pandas as pd
         import pyarrow.parquet as pq
+
+        # On by default: the three stages disagreeing on prompt phrasing is a measured
+        # 13-point swing (see align_user_prompt). Set SFT_ALIGN_PROMPTS=0 to train on the
+        # questions exactly as stored, which is what every run before this change did.
+        if os.environ.get("SFT_ALIGN_PROMPTS", "1") == "1":
+            self.align_domain = _infer_domain(self.parquet_files)
+            if self.align_domain:
+                print(f"prompt alignment: rewriting {self.align_domain} questions to RL phrasing")
 
         # Opt-in because it changes what a rank sees; harmless single-process default.
         shard = os.environ.get("SFT_SHARD_BY_RANK", "0") == "1"
@@ -280,8 +413,23 @@ class M2RLSFTDataset(MultiTurnSFTDataset):
         consumer at once. Without it, ``tool_calls`` arrives as the string ``'[]'`` and Qwen3's
         template hits ``tojson`` on a Jinja ``Undefined``, raising
         ``TypeError: Object of type Undefined is not JSON serializable``.
+
+        This is also where the question is rewritten into the RL/eval phrasing (see
+        ``align_user_prompt``), so the parquet on disk stays untouched and the alignment
+        can be A/B'd with ``SFT_ALIGN_PROMPTS=0``.
         """
-        return normalize_messages(super()._build_messages(example))
+        messages = normalize_messages(super()._build_messages(example))
+        if self.align_domain is None:
+            return messages
+        # Only the first user turn carries the format instruction; later turns in a
+        # multi-turn row are follow-ups and must not gain a second copy of the suffix.
+        for message in messages:
+            if message.get("role") == "user":
+                content = message.get("content")
+                if isinstance(content, str):
+                    message["content"] = align_user_prompt(content, self.align_domain)
+                break
+        return messages
 
     def _render(
         self,
