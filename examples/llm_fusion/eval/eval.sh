@@ -48,8 +48,22 @@ fi
 VAL_N=${VAL_N:-16}
 VAL_TEMPERATURE=${VAL_TEMPERATURE:-0.6}
 VAL_TOP_P=${VAL_TOP_P:-0.95}
-# Left unset, verl puts the whole suite in one batch: ~1.4k prompts times VAL_N.
-VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-128}
+# Prompts per validation batch; each is sampled VAL_N times, so the engine sees
+# VAL_BATCH_SIZE * VAL_N concurrent sequences. Left unset, verl puts the whole
+# suite in one batch: ~1.6k prompts times VAL_N.
+#
+# 64 is sized against the KV cache, not against verl's max_num_seqs (1024 per
+# engine, so 8 single-GPU engines admit far more than we ever submit). On a 96G
+# card ROLLOUT_GPU_MEM_UTIL=0.7 leaves ~55 GiB of KV; Qwen3-4B needs 36 layers *
+# 2 * 8 kv heads * 128 head_dim * 2 bytes = 144 KiB per token, so ~400k tokens
+# per engine. 64 * 16 = 1024 sequences spread over 8 engines is 128 running per
+# engine -- enough to keep decode saturated, and close to what the cache holds
+# for typical response lengths. The previous default of 128 doubled that, and
+# vLLM then preempted requests that had num_computed_tokens=0 and recomputed
+# them: harmless (mixrl step400 logged 374 such warnings, up to 12 per request,
+# and finished all eight sets) but it wastes throughput. Lower it further if
+# you see num_preemptions climbing on a smaller-GPU or higher-VAL_N run.
+VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-64}
 
 # 5120 covers 100% of the eval suite. The longest prompts are BFCL v3 at 4873
 # tokens -- its rows carry 18-39 tool schemas, which dominate the text -- and one
