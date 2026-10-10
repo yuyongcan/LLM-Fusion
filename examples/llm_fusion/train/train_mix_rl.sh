@@ -57,13 +57,11 @@ ACTOR_LR=${ACTOR_LR:-1e-6}
 USE_KL_LOSS=${USE_KL_LOSS:-True}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 NORM_ADV_BY_STD_IN_GRPO=${NORM_ADV_BY_STD_IN_GRPO:-FALSE}
-# How token losses are pooled into one scalar. token-mean pools every token in the
-# batch into one mean, so each token weighs the same and a long chain of thought
-# contributes in proportion to its length. seq-mean-token-mean averages within each
-# sequence first, then across sequences, so every rollout counts once regardless of
-# length -- in a five-domain mixture that equalises the domains rather than the
-# tokens. Set explicitly to compare.
-LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
+# Average within each response, then across responses, so each rollout has equal
+# aggregation weight regardless of its length. With a fixed ROLLOUT_N, domain
+# aggregation weights follow prompt counts rather than response token counts.
+# Set LOSS_AGG_MODE=token-mean to recover the previous token-weighted aggregation.
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-seq-mean-token-mean}
 
 # ---- rollout ----
 ROLLOUT_TP=${ROLLOUT_TP:-1}

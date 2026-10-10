@@ -58,9 +58,9 @@ ACTOR_LR=${ACTOR_LR:-1e-6}
 USE_KL_LOSS=${USE_KL_LOSS:-True}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 NORM_ADV_BY_STD_IN_GRPO=${NORM_ADV_BY_STD_IN_GRPO:-FALSE}
-# Pool every token in the batch into one mean, so each token weighs the same
-# regardless of which rollout produced it; see the note in train_mix_rl.sh.
-LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
+# Give each response equal aggregation weight regardless of its length; see
+# train_mix_rl.sh. Set LOSS_AGG_MODE=token-mean for the previous aggregation.
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-seq-mean-token-mean}
 
 # ---- rollout ----
 ROLLOUT_TP=${ROLLOUT_TP:-1}

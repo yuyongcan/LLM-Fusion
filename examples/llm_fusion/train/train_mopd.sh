@@ -80,10 +80,10 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-24576}
 MAX_NUM_TOKENS=${MAX_NUM_TOKENS:-$(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 1 ))}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 NORM_ADV_BY_STD_IN_GRPO=${NORM_ADV_BY_STD_IN_GRPO:-FALSE}
-# Pool every token in the batch into one mean, so each token weighs the same
-# regardless of which rollout produced it; see the note in train_mix_rl.sh. This
-# also governs the distillation KL term, which shares the same aggregation.
-LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
+# Give each response equal aggregation weight regardless of its length; see
+# train_mix_rl.sh. The distillation term uses the same aggregation. Set
+# LOSS_AGG_MODE=token-mean to recover the previous token-weighted aggregation.
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-seq-mean-token-mean}
 
 # ---- rollout ----
 ROLLOUT_TP=${ROLLOUT_TP:-1}
