@@ -27,6 +27,13 @@ from verl.workers.config import (
 class TestActorConfig(unittest.TestCase):
     """Test the ActorConfig dataclass and its variants."""
 
+    def test_default_loss_aggregation(self) -> None:
+        """Actor variants default to equal aggregation weight per response."""
+        for config_cls in (ActorConfig, FSDPActorConfig, McoreActorConfig):
+            with self.subTest(config_cls=config_cls):
+                config = config_cls(strategy="fsdp", use_dynamic_bsz=True, rollout_n=1)
+                self.assertEqual(config.loss_agg_mode, "seq-mean-token-mean")
+
     def test_config_inheritance(self):
         """Test that the inheritance hierarchy works correctly."""
         megatron_dict = {
@@ -74,6 +81,20 @@ class TestActorConfig(unittest.TestCase):
 
         self.assertIsInstance(config, ActorConfig)
         self.assertEqual(config.strategy, "fsdp")
+        self.assertEqual(config.loss_agg_mode, "seq-mean-token-mean")
+
+    def test_loss_aggregation_yaml_override(self) -> None:
+        """Explicit token-weighted aggregation remains supported."""
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor"), version_base=None):
+            cfg = compose(
+                config_name="actor",
+                overrides=["strategy=fsdp", "ppo_micro_batch_size_per_gpu=128", "loss_agg_mode=token-mean"],
+            )
+
+        config = omega_conf_to_dataclass(cfg)
+        self.assertEqual(config.loss_agg_mode, "token-mean")
 
     def test_fsdp_actor_config_from_yaml(self):
         """Test creating FSDPActorConfig from YAML file."""
@@ -86,6 +107,7 @@ class TestActorConfig(unittest.TestCase):
 
         self.assertIsInstance(config, FSDPActorConfig)
         self.assertEqual(config.strategy, "fsdp2")
+        self.assertEqual(config.loss_agg_mode, "seq-mean-token-mean")
 
     def test_megatron_actor_config_from_yaml(self):
         """Test creating McoreActorConfig from YAML file."""
@@ -98,6 +120,7 @@ class TestActorConfig(unittest.TestCase):
 
         self.assertIsInstance(config, McoreActorConfig)
         self.assertEqual(config.strategy, "megatron")
+        self.assertEqual(config.loss_agg_mode, "seq-mean-token-mean")
 
     def test_config_get_method(self):
         """Test the get method for backward compatibility."""

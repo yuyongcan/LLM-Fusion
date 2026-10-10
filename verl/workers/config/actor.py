@@ -165,7 +165,7 @@ class ActorConfig(BaseConfig):
     freeze_vision_tower: bool = False
     policy_loss: PolicyLossConfig = field(default_factory=PolicyLossConfig)
     clip_ratio_c: float = 3.0
-    loss_agg_mode: str = "token-mean"
+    loss_agg_mode: str = "seq-mean-token-mean"
     loss_scale_factor: Optional[int] = None
     entropy_coeff: float = 0
     tau_pos: float = 1.0
