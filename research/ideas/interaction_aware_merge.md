@@ -1,78 +1,42 @@
-# Verifier-Calibrated Merge Around Task Arithmetic
+# 围绕 Task Arithmetic 的验证器校准合并
 
-Updated: 2026-09-17. Active proposal; coefficient selection is not yet
-implemented or validated. The filename is retained for existing references.
+更新时间：2026-09-17。当前活跃提案；系数选择**尚未实现也尚未验证**。文件名沿用旧名以便既有引用不失效。
 
-## Goal
+## 目标
 
-Produce a static merged checkpoint with better measured multi-domain
-performance than strong, comparably calibrated baselines. Follow the
-[research plan](../notes/research_plan.md) for acceptance rules. Geometry and
-interactions guide candidate selection only when useful; they are not required
-mechanisms or success criteria.
+产出一个静态合并 checkpoint，其在多域上的实测表现要优于那些经过同等校准的强基线。验收规则遵循[研究计划](../notes/research_plan.md)。几何结构与交互效应只在有用时用于指导候选选择，它们**不是**必须的机制，也不是成功判据。
 
-## Evidence driving the design
+## 驱动设计的证据
 
-- TA lambda=1 remains the strongest observed reasoning-screen point estimate.
-  Norm-matched RAM+ and ResMerge reach 61.98 and 62.16 AVG5, versus TA's 64.50
-  at n=4. This is insufficient to conclude they are universally worse.
-- Soft-Overlap reaches 60.05 at roughly comparable update norm. Drop its
-  current coordinate replacement rule from the primary implementation path.
-- The n=16 IF x Agent interaction is +1.06 AVG3 with a confidence interval
-  spanning zero. It does not justify a mandatory pairwise parameter component.
-- Functional cosine correlates more strongly with transfer on all 20 directed
-  pairs, but this ordering reverses when IF->Agent is removed. Treat it as an
-  exploratory diagnostic, not a validated coefficient-selection signal.
-- The pilot uniform sweep has domain tradeoffs and only varies one direction
-  in five-dimensional coefficient space. Measure separate expert responses
-  before fitting an adaptive merge.
+- TA lambda=1 仍是推理筛选集上观测到的最强点估计。norm-matched 的 RAM+ 与 ResMerge 在 n=4 下分别达到 61.98 和 62.16 AVG5，而 TA 是 64.50。这不足以断定它们普遍更差。
+- Soft-Overlap 在大致相当的 update norm 下达到 60.05。把它当前的坐标替换规则从主实现路径中去掉。
+- n=16 下的 IF × Agent 交互项为 +1.06 AVG3，置信区间**跨越零点**。它不足以支撑一个强制的成对参数分量。
+- 功能余弦在全部 20 个有向对上与迁移的相关性更强，但当去掉 IF→Agent 这一对后，该排序会反转。把它当作探索性诊断，而不是已验证的系数选择信号。
+- 试点的统一系数扫描存在域间取舍，而且只在五维系数空间中变动了一个方向。在拟合自适应合并之前，先测量各专家**各自**的响应。
 
-See [current findings](../results/current_findings.md) for uncertainty and
-reproducible source tables.
+不确定性区间与可复现的来源表格见[当前发现](../results/current_findings.md)。
 
-## First implementation
+## 第一阶段实现
 
-`theta(a) = theta_0 + sum_i a_i tau_i`.
+`theta(a) = theta_0 + sum_i a_i tau_i`。
 
-Use fp32 arithmetic and a common bf16 export. Begin within a small trust region
-`0.8 <= a_i <= 1.2`; `a_i=1` recovers TA. Use
-`experiments/calibration/next_design.json` to measure one expert at a time,
-followed by mixed settings reserved for prediction checks.
+使用 fp32 运算，统一导出为 bf16。先在一个小的信任域内搜索 `0.8 <= a_i <= 1.2`；`a_i=1` 即退化为 TA。用 `experiments/calibration/next_design.json` 逐专家测量，随后再跑预留给预测检验的混合组合。
 
-For each domain, fit verifier reward and generation cost as functions of
-`z = a - 1`. Start with regularized main effects and diagonal quadratic terms.
-Optimize mean reward under per-domain retention and length/cap-hit constraints.
-Actually evaluate the selected coefficients on reserved validation prompts,
-and fall back to the frozen reference when the correction fails.
+对每个域，把验证器 reward 与生成开销拟合成 `z = a - 1` 的函数。从带正则化的主效应加对角二次项起步。在每域保留率约束以及长度/触顶约束下优化均值 reward。被选中的系数要在预留的验证 prompt 上**真实评测**，校正失败时回退到冻结的参考点。
 
-The model's behavior is nonlinear even when checkpoint weights are an additive
-merge. Cross terms in a response model can represent this behavior without
-adding a constructed interaction vector to the checkpoint. A full quadratic
-over five coefficients has 21 parameters including its intercept. Three
-uniform settings cannot identify it; fitting cross terms requires a new,
-overdetermined design and successful out-of-design prediction checks.
+即便 checkpoint 权重是加性合并，模型行为依然是非线性的。响应模型中的交叉项可以表达这种行为，而无需往 checkpoint 里加一个人造的交互向量。五个系数的完整二次型含截距共 21 个参数。三个统一系数组合无法识别它；要拟合交叉项，需要一个新的、超定的设计，并且要通过设计外的预测检验。
 
-## Optional extension
+## 可选扩展
 
-After establishing the scalar control, permit one or two module corrections:
+在确立标量对照组之后，才允许加入一到两个模块级校正：
 
-`theta(a,b) = theta_0 + sum_i a_i tau_i + sum_(i,g) b_(i,g) M_g tau_i`.
+`theta(a,b) = theta_0 + sum_i a_i tau_i + sum_(i,g) b_(i,g) M_g tau_i`。
 
-The existing module-coefficient merger provides these masks. Its `embedding`
-group includes token embeddings and `lm_head` when present. A correction is
-retained only if it beats scalar calibration at equal search cost. Evaluate
-IF and Agent directly: a reasoning-only embedding screen cannot establish IF
-retention. Activation subspaces and trajectory components remain alternative
-future candidates, with their own implementation and validation costs.
+现有的模块系数合并器已经提供了这些 mask。其中的 `embedding` 组包含 token embedding 以及（若存在）`lm_head`。只有当某个校正在**同等搜索开销**下胜过标量校准时才保留它。要直接评测 IF 和 Agent：只在推理域上做的 embedding 筛选无法证明 IF 能力被保留。激活子空间与轨迹分量仍是备选的未来方向，各自都有实现与验证成本。
 
-## Method comparisons
+## 方法对比
 
-Compare fixed TA, calibrated uniform TA, calibrated five-expert scalars, and
-scaled RAM+/ResMerge under the same selection data and budget. For a structured
-extension, report ablations removing its residual and its constraints. Report
-post-export norm, every domain score, generated tokens, cap hits/finish
-reasons, tool calls, and total calibration cost.
+在相同的选择数据与预算下，对比固定 TA、校准过的统一 TA、校准过的五专家标量，以及 scaled RAM+/ResMerge。对于结构化扩展，要报告去掉其残差项、去掉其约束项的消融。报告导出后的范数、每个域的分数、生成 token 数、触顶/结束原因、工具调用次数，以及总的校准开销。
 
-Improved engineering performance is sufficient for the first deliverable.
-Any publication claim must separately establish what the procedure adds over
-existing coefficient search, verifier-guided selection, and structured merging.
+对第一阶段的交付物而言，**工程上的性能提升就足够了**。
+任何发表层面的主张，都必须另行论证该方法相对现有的系数搜索、验证器指导的选择以及结构化合并究竟多贡献了什么。

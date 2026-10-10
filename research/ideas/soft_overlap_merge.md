@@ -1,49 +1,45 @@
-# Soft-Overlap Merge (SOM): First Candidate
+# Soft-Overlap Merge（SOM）：首个候选方法
 
-Status: implemented and screened; rejected as the primary candidate in its
-current form. The norm-matched checkpoint scores 60.05 reasoning AVG5 at n=4,
-versus 64.50 for the selected TA lambda=1 run. This result applies to the tested
-configuration, not every possible soft-overlap method. The design below is
-retained as a historical record. See [current findings](../results/current_findings.md).
+状态：已实现并做过筛选；**当前形态下已作为主候选被否决**。norm-matched 的 checkpoint 在 n=4 下得 60.05 推理 AVG5，而被选中的 TA lambda=1 那次是 64.50。该结论只适用于**所测试的这一套配置**，而非所有可能的 soft-overlap 方法。下面的设计作为历史记录保留。参见[当前发现](../results/current_findings.md)。
 
-## Problem diagnosed locally
+## 本地诊断出的问题
 
-RAM classifies a coordinate as active with `abs(delta) > epsilon`, then treats coordinates active in one expert as private and those active in at least two experts as shared. On the local five fp32 RLVR experts, this partition is highly threshold-sensitive:
+RAM 用 `abs(delta) > epsilon` 判定某个坐标是否为激活，然后把只在一个专家中激活的坐标当作私有、把至少在两个专家中激活的坐标当作共享。在本地这五个 fp32 RLVR 专家上，该划分对阈值极其敏感：
 
-| Threshold | Coordinates active in exactly one expert | Active in all five | IF unique-energy fraction |
+| 阈值 | 恰好在一个专家中激活的坐标 | 五个专家中均激活 | IF 独有能量占比 |
 |---:|---:|---:|---:|
 | `1e-6` | 3.9% | 69.2% | 1.0% |
 | `5e-6` | 5.1% | 22.2% | 1.9% |
 | `1e-5` | 13.8% | 4.1% | 7.2% |
 | `2e-5` | 37.3% | 0.05% | 41.8% |
 
-The definition of private knowledge therefore changes drastically under a modest absolute threshold change.
+因此，「私有知识」的定义在绝对值阈值稍作变动时就会剧烈改变。
 
-## Threshold-free formulation
+## 无阈值形式化
 
-For each parameter coordinate, let `a_i = |delta_i|`. Define soft participation
+对每个参数坐标，令 `a_i = |delta_i|`。定义软参与度
 
-`p_i = a_i^q / (a_i^q + s^q)`,
+`p_i = a_i^q / (a_i^q + s^q)`，
 
-where `s` is a coordinate-local robust scale such as the RMS or maximum magnitude across experts. This makes participation invariant to layer scale. The effective number of active experts is
+其中 `s` 是坐标局部的鲁棒尺度，例如跨专家的 RMS 或最大幅值。这使得参与度对层尺度不变。有效激活专家数为
 
-`n_eff = (sum_i p_i)^2 / sum_i p_i^2`,
+`n_eff = (sum_i p_i)^2 / sum_i p_i^2`，
 
-which ranges continuously from 1 (private) to N (shared).
+它从 1（私有）到 N（共享）连续变化。
 
-Define a consensus update from sign-compatible weighted deltas, and a private update from the strongest expert contribution. A smooth gate `g(n_eff)` interpolates between them:
+由符号兼容的加权 delta 定义共识更新，由最强专家的贡献定义私有更新。用一个平滑门控 `g(n_eff)` 在二者之间插值：
 
-`delta_merge = g(n_eff) * consensus + (1 - g(n_eff)) * private`.
+`delta_merge = g(n_eff) * consensus + (1 - g(n_eff)) * private`。
 
-Coordinates with large sign conflict receive lower consensus confidence. A small global gain may be determined by norm matching rather than benchmark tuning.
+符号冲突较大的坐标获得更低的共识置信度。一个小的全局增益可以靠 norm 匹配确定，而不是靠调 benchmark。
 
-## Intended distinctions (not an established novelty claim)
+## 意图上的区别（并非已确立的新颖性主张）
 
-- Unlike RAM, no absolute active/inactive threshold or discrete overlap count is used.
-- Unlike TIES, it does not discard all minority-sign updates after a global sign election.
-- Unlike ResMerge/SVC, it operates on continuous coordinate participation rather than singular components.
-- Unlike generic coefficient search, its parameterization is weight-derived and scale-invariant.
+- 与 RAM 不同：不使用绝对的激活/未激活阈值，也不使用离散的重叠计数。
+- 与 TIES 不同：不会在全局符号选举后丢弃所有少数派符号的更新。
+- 与 ResMerge/SVC 不同：它作用于连续的坐标参与度，而非奇异分量。
+- 与通用系数搜索不同：其参数化由权重本身导出，且对尺度不变。
 
-## Risks and falsification
+## 风险与证伪
 
-The method may merely resemble a smooth magnitude-weighted average and lose strong private updates. It must beat RAM, ResMerge, and norm-matched Task Arithmetic under the same evaluation. Ablations should compare hard versus soft participation, no sign-confidence gate, and no norm matching.
+该方法可能只是在退化成一个平滑的幅值加权平均，从而丢掉强的私有更新。它必须在同一套评测下胜过 RAM、ResMerge 和 norm-matched Task Arithmetic。消融应对比硬参与度 vs 软参与度、去掉符号置信门控、以及去掉 norm 匹配这几种情况。

@@ -1,35 +1,30 @@
-# Initial Hypotheses
+# 初始假设
 
-Status: historical starting hypotheses. The active goal is a better measured
-merge, defined in [research_plan.md](research_plan.md); none of these proposed
-mechanisms is a prerequisite. Current evidence rejects the first Soft-Overlap
-configuration and leaves stable IF x Agent synergy unconfirmed.
+状态：历史上的起始假设。当前活跃的目标是「一个实测更优的合并方法」，定义在 [research_plan.md](research_plan.md)；下面这些机制**都不是**前置条件。现有证据已否决第一个 Soft-Overlap 配置，并且稳定的 IF × Agent 协同效应仍未得到确认。
 
-## Observations to explain
+## 需要解释的观测
 
-1. The apparent IF degradation at the paper's `lambda=0.6` largely disappears at larger global coefficients.
-2. Adding low-cosine IF and Agent experts improves the reasoning-domain merge relative to a Math/Science/Code-only merge.
-3. Different benchmarks prefer different global coefficients, suggesting one scalar is too restrictive.
+1. 论文 `lambda=0.6` 下表面上出现的 IF 退化，在更大的全局系数下基本消失。
+2. 加入低余弦的 IF 和 Agent 专家，相对只合并 Math/Science/Code 的版本改善了推理域的合并结果。
+3. 不同基准偏好不同的全局系数，说明单一标量过于受限。
 
-## Important caveats
+## 重要警示
 
-- A single expert's eight-benchmark average is not comparable to the paper's per-domain-RL row, which selects the matching expert for each domain.
-- Coefficients were selected on the reported test suite; generalization claims
-  need independently reserved prompts. Repeated decoding seeds measure
-  sampling stability but do not repair test-set selection bias.
-- Larger coefficients increase response length. On the reproduced 4B sweep, reasoning-task mean length rises from about 4.3k tokens at `lambda=0.6` to 5.9k at `lambda=1.0`; LiveCodeBench truncation also rises.
+- 单个专家的八基准均值与论文的 per-domain-RL 行**不可比** —— 后者为每个域挑选匹配的专家。
+- 系数是在所报告的测试套件上选出来的；泛化性主张需要独立预留的 prompt。重复解码种子衡量的是采样稳定性，并不能修复测试集选择偏差。
+- 更大的系数会拉长回答长度。在复现的 4B 扫描中，推理任务的平均长度从 `lambda=0.6` 时约 4.3k token 上升到 `lambda=1.0` 时的 5.9k；LiveCodeBench 的截断率也随之上升。
 
-## Candidate mechanism
+## 候选机制
 
-Global cosine similarity can hide structured agreement: two task vectors may be nearly orthogonal overall while sharing useful directions in selected layers, modules, singular subspaces, or parameter coordinates. Decompose each task vector into:
+全局余弦相似度可能掩盖结构上的一致性：两个 task vector 整体上近乎正交，却可能在选定的层、模块、奇异子空间或参数坐标上共享有用的方向。把每个 task vector 分解为：
 
 `tau_i = shared_i + private_i`
 
-where `shared_i` lies in a consensus subspace learned from all experts and `private_i` is its residual. Merge the consensus only once, then scale private components independently. Candidate coefficients should depend on local agreement, update magnitude, and a small calibration objective rather than a single global lambda.
+其中 `shared_i` 位于从所有专家学到的共识子空间中，`private_i` 是其残差。共识分量只合并一次，私有分量各自独立缩放。候选系数应当依赖局部一致性、更新幅度以及一个小的校准目标，而不是单一的全局 lambda。
 
-## Falsifiable predictions
+## 可证伪的预测
 
-- Five-expert gains on reasoning tasks should concentrate in particular layers/modules rather than arise uniformly across parameters.
-- Shared components should transfer across domains with lower interference than raw task-vector sums.
-- IF-specific residual scaling should improve IFBench without requiring equal amplification of reasoning vectors.
-- Any accuracy gain from larger coefficients should be evaluated jointly with response length and truncation rate.
+- 五专家在推理任务上的增益应当集中在特定的层/模块，而不是在参数上均匀产生。
+- 共享分量应当以比原始 task vector 求和更低的干扰实现跨域迁移。
+- 针对 IF 的残差缩放应当能改善 IFBench，且无需同等放大推理向量。
+- 任何来自更大系数的准确率增益，都必须与回答长度和截断率联合评估。

@@ -1,160 +1,97 @@
-# Current Findings and Method Decisions
+# 当前发现与方法决策
 
-Updated: 2026-09-17. The objective is an implemented, measurably better model
-merge. No current candidate has demonstrated that outcome across all five
-domains under independent confirmation.
+更新于 2026-09-17。目标是实现一个**已实现、可测量地更优**的模型合并。在独立确认下，目前**没有**任何候选方法在所有五个域上展现出该结果。
 
-## Evidence sources and scope
+## 证据来源与适用范围
 
-[Recomputed tables](20260917_reassessment/tables.md) and
-[machine-readable results](20260917_reassessment/summary.json) come from
-`experiments/reassess_existing_results.py`. The JSON records source hashes,
-prompt counts, all domain/benchmark metrics, and paired contrasts. Reproduce:
+[重算表格](20260917_reassessment/tables.md)与
+[机器可读结果](20260917_reassessment/summary.json)来自
+`experiments/reassess_existing_results.py`。JSON 中记录了来源哈希、prompt 计数、全部域/基准指标以及配对对比。复现方式：
 
 ```bash
 python3 research/experiments/reassess_existing_results.py
 ```
 
-Intervals use 20,000 prompt-cluster bootstrap replicates, NumPy RNG seed
-20260917, pairing models by input and resampling separately within each
-benchmark. Benchmarks/domains receive equal weight. Identical inputs stay in
-the same cluster; duplicate source-row weights are retained. These exploratory
-intervals condition on saved generations, do not correct for prior selection
-or multiple comparisons, and are not independent-seed replication. Minor
-differences from the older factorial intervals reflect the new RNG stream.
+区间使用 20,000 次 prompt 聚类 bootstrap 重抽样，NumPy RNG 种子 20260917，按 input 配对模型、并在每个基准内部分别重采样。基准/域等权。相同的输入留在同一个聚类中；重复来源行的权重予以保留。这些探索性区间以已保存的生成为条件，不对此前的选择或多重比较做校正，也不是独立种子的复现。与较早的析因区间存在细微差异，反映的是新的 RNG 流。
 
-Existing public tests are development data because lambda and hypotheses were
-chosen using them. Increasing n or changing the decoding seed does not make
-their prompts untouched. Existing calibration rows were sampled after expert
-training, so they may be in-training examples. The standard recorded decoding
-uses temperature 0.6, top-p 0.95 and a 16,384-token response limit. Historical
-launchers do not freeze every provenance field required by the new protocol.
-The reported cap-hit rate uses response length, not an explicit finish reason.
+现有的公开测试属于开发数据，因为 lambda 和假设都是用它们选出来的。增大 n 或改解码种子并不能使它们的 prompt 变成未被触碰过的。现有的校准行是在专家训练之后采样的，因此可能就是训练中的样本。所记录的标准解码使用 temperature 0.6、top-p 0.95，以及 16,384 token 的回答上限。历史启动脚本并没有冻结新协议所要求的每一个来源字段。所报告的触顶率使用的是回答长度，而非显式的结束原因。
 
-## Baselines: direction, scale, and uncertainty
+## 基线：方向、尺度与不确定性
 
-All numbers below are the five reasoning benchmarks at n=4. They exclude IF
-and Agent and are not AVG8 or the calibration five-domain macro.
+以下数字均为 n=4 下五个推理基准的结果。它们排除了 IF 与 Agent，既不是 AVG8，也不是校准集五域宏平均。
 
-| Method | AVG5 | Delta vs TA (95% CI), pp | Mean tokens | Cap hits |
+| 方法 | AVG5 | 相对 TA 的差（95% CI），pp | 平均 token | 触顶率 |
 |---|---:|---:|---:|---:|
-| TA lambda=1 | 64.50 | reference | 6,407 | 2.65% |
+| TA lambda=1 | 64.50 | 参考 | 6,407 | 2.65% |
 | RAM+ | 58.61 | -5.89 [-8.58, -3.31] | 4,738 | 2.29% |
-| RAM+ norm matched | 61.98 | -2.52 [-4.71, -0.42] | 5,131 | 0.55% |
+| RAM+ 范数匹配 | 61.98 | -2.52 [-4.71, -0.42] | 5,131 | 0.55% |
 | ResMerge | 56.05 | -8.46 [-11.17, -5.88] | 4,828 | 4.61% |
-| ResMerge norm matched | 62.16 | -2.34 [-4.77, +0.05] | 5,895 | 0.76% |
-| Soft-Overlap norm matched | 60.05 | -4.46 [-7.08, -1.89] | 5,115 | 0.55% |
-| IF embedding coefficient 1.2 | 63.09 | -1.42 [-4.08, +1.08] | 6,458 | 2.63% |
+| ResMerge 范数匹配 | 62.16 | -2.34 [-4.77, +0.05] | 5,895 | 0.76% |
+| Soft-Overlap 范数匹配 | 60.05 | -4.46 [-7.08, -1.89] | 5,115 | 0.55% |
+| IF embedding 系数 1.2 | 63.09 | -1.42 [-4.08, +1.08] | 6,458 | 2.63% |
 
-Norm matching recovers 3.37 points for RAM+ and 6.12 for ResMerge. Their original
-deficits mix scale and direction effects. ResMerge's residual gap is not
-resolved at this sample size, and both scaled baselines have shorter outputs
-and fewer cap hits than TA. Keep them as competitors, including calibrated
-global-scale controls and a comparison at similar generation cost.
+范数匹配为 RAM+ 挽回了 3.37 个点，为 ResMerge 挽回了 6.12 个点。它们原本的 deficits 混合了尺度效应与方向效应。ResMerge 的残余差距在该样本量下尚无结论，而且两个 scaled 基线的输出都更短、触顶更少。保留它们作为竞争者，包括校准过的全局尺度对照组，以及在相近生成开销下的对比。
 
-The build script scales previously bf16-exported updates by 3.121 and 8.234.
-Post-rescaling export quantization can change their norms again; a requested
-norm match is not proof of an exact deployed match. Record both pre-export and
-post-export norms in future comparisons. Historical natural deployed norms
-were TA 2.228, RAM+ 0.714, ResMerge 0.271, and Soft-Overlap 2.163.
+构建脚本把此前已导出的 bf16 更新分别缩放了 3.121 和 8.234 倍。重缩放之后的导出量化可能再次改变它们的范数；**所要求的**范数匹配并不能证明部署范数精确匹配。未来的对比要同时记录导出前与导出后的范数。历史上自然部署的范数为 TA 2.228、RAM+ 0.714、ResMerge 0.271、Soft-Overlap 2.163。
 
-Another saved TA lambda=1 run scores 62.67, a -1.83 difference from the selected
-64.50 run, with interval [-4.17, +0.38]. These runs are not a controlled seed
-sweep. The difference nevertheless shows why each experiment needs a
-contemporaneous anchor and why an n=4 ordering should not be treated as final.
+另一次已保存的 TA lambda=1 运行得分 62.67，与被选中的那次 64.50 相差 −1.83，区间为 [−4.17, +0.38]。这些运行**不是**受控的种子扫描。但这一差异仍然说明了为什么每个实验都需要一个同时期的锚点，以及为什么不应把 n=4 的排序当作最终结论。
 
-Decision: retire this Soft-Overlap configuration; retain scaled RAM+/ResMerge;
-prioritize calibrated additive merges with direct budget constraints.
+决策：淘汰当前这个 Soft-Overlap 配置；保留 scaled RAM+/ResMerge；优先做带直接预算约束的校准加性合并。
 
-## Factorial evidence is inconclusive
+## 析因证据尚无结论
 
-At n=16 on AIME25/AIME26/GPQA:
+在 AIME25/AIME26/GPQA 上以 n=16：
 
-| Contrast | AVG3 delta, pp | 95% CI |
+| 对比 | AVG3 差值，pp | 95% CI |
 |---|---:|---:|
-| IF x Agent interaction | +1.06 | [-1.26, +3.54] |
-| All five minus M/S/C | +1.64 | [-0.62, +4.02] |
-| IF added to M/S/C | -0.07 | [-2.03, +1.89] |
-| Agent added to M/S/C | +0.64 | [-1.54, +2.76] |
+| IF × Agent 交互 | +1.06 | [-1.26, +3.54] |
+| 全五专家减 M/S/C | +1.64 | [-0.62, +4.02] |
+| 在 M/S/C 上加 IF | -0.07 | [-2.03, +1.89] |
+| 在 M/S/C 上加 Agent | +0.64 | [-1.54, +2.76] |
 
-The earlier description of All5-MCS as a robust gain overstated the evidence.
-Both that gain and the interaction remain uncertain. Selection of these three
-benchmarks based on the n=4 screen further limits a confirmation claim.
+早先把 All5-MCS 描述为一项稳固增益，是**夸大**了证据。该增益与交互项都仍然不确定。而这三个基准是基于 n=4 筛选选出来的，这进一步限制了确认性主张。
 
-Decision: keep all experts in the starting merge, but do not make positive
-IF x Agent synergy a premise of the method. A nonlinear reward response does
-not require an explicit interaction vector in parameter space.
+决策：在起始合并中保留全部专家，但**不要**把「IF × Agent 存在正协同」当作方法的前提。非线性的 reward 响应并不要求在参数空间中存在一个显式的交互向量。
 
-## Calibration exposes domain and cost tradeoffs
+## 校准暴露了域与成本之间的取舍
 
-The saved pilot has 128 source rows/domain with two generations/row:
+已保存的试点每域 128 条来源行、每行两次生成：
 
-| Lambda | Math | Science | Code | IF | Agent | Domain macro | Tokens |
+| Lambda | Math | Science | Code | IF | Agent | 域宏平均 | Tokens |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | 0.8 | 51.17 | 53.91 | 21.93 | 69.14 | 97.27 | 58.68 | 2,529 |
 | 1.0 | 48.83 | 55.08 | 24.26 | 71.09 | 95.31 | 58.91 | 2,792 |
 | 1.2 | 47.66 | 56.25 | 21.74 | 73.44 | 89.45 | 57.71 | 3,121 |
 
-Relative to lambda=1, lambda=0.8 changes the mean by -0.23 pp with interval
-[-1.97, +1.49], while reducing mean generated tokens by about 9.4%. Lambda=1.2
-raises IF by 2.34 pp but lowers Agent by 5.86 pp, with about 11.8% more tokens.
-These are effects of changing all five coefficients simultaneously, not
-identified IF-expert or Agent-expert causal effects. Lambda=1 is a useful
-anchor, not a confidently superior cost-adjusted calibration choice.
+相对 lambda=1，lambda=0.8 使均值变化 −0.23 pp，区间 [−1.97, +1.49]，同时把平均生成 token 减少约 9.4%。Lambda=1.2 使 IF 提高 2.34 pp，却使 Agent 降低 5.86 pp，且 token 增加约 11.8%。这些是**同时**改变五个系数的效应，**不是**已识别出的 IF 专家或 Agent 专家的因果效应。Lambda=1 是一个有用的锚点，而不是一个在成本 adjusted 意义上确证的更优校准选择。
 
-Agent has only 125 unique input strings: three inputs each occur twice among
-the 128 source rows and have matching ground truths. The analysis clusters
-them and retains source-row weighting so point scores match the recorded
-evaluation. Future splits need content deduplication and provenance checks.
+Agent 只有 125 条去重输入字符串：在 128 条来源行中有三条输入各出现两次，且 ground truth 相同。分析对它们做了聚类并保留来源行权重，因此点分数与所记录的评测一致。未来的划分需要做内容去重与来源检查。
 
-The uniform sweep's linear design rank is 2/6 and full quadratic rank is 3/21.
-It cannot support a fit of separate expert effects or pairwise interactions.
-The prepared next design measures ten axial changes plus an anchor, then four
-mixed settings for prediction checks. It has not been run.
+统一扫描的线性设计秩为 2/6，完整二次型秩为 3/21。它无法支撑对各专家独立效应或成对交互的拟合。准备好的下一步设计测量十个轴向变动加一个锚点，随后是四个用于预测检验的混合设置。**尚未运行**。
 
-Decision: implement verifier-calibrated expert coefficients first; optimize
-mean reward with per-domain and generation-budget constraints. Benchmark it
-against calibrated uniform TA, including the cheaper lambda=0.8 candidate.
+决策：先实现验证器校准的专家系数；在逐域约束与生成预算约束下优化均值 reward。把它与校准过的统一 TA（包括更省算力的 lambda=0.8 候选）做基准对比。
 
-## Functional geometry has no stable superiority yet
+## 功能几何尚无稳定优势
 
-The analysis uses base-model activations from eight prompts and 64 sampled
-tokens per domain, covering 252 transformer linear matrices. It measures
-local `Delta W x`, not end-to-end logit or verifier changes, and omits embedding
-and normalization perturbations. The saved artifact lacks a prompt-offset
-field; do not invent one from the current script default.
+该分析使用来自 8 条 prompt、每域 64 个采样 token 的基座模型激活，覆盖 252 个 transformer 线性矩阵。它测量的是局部的 `Delta W x`，不是端到端的 logit 或验证器变化，并且省略了 embedding 与归一化的扰动。已保存的产物缺少 prompt-offset 字段；不要从当前脚本的默认值凭空编造一个。
 
-| Pair subset | Raw weight r | Functional r |
+| 配对子集 | 原始权重 r | 功能 r |
 |---|---:|---:|
-| All 20 directed pairs | 0.389 | 0.523 |
-| Remove IF->Agent | 0.570 | 0.497 |
-| Remove every IF pair | 0.586 | 0.367 |
-| Remove every Agent pair | 0.606 | 0.555 |
+| 全部 20 个有向对 | 0.389 | 0.523 |
+| 去掉 IF→Agent | 0.570 | 0.497 |
+| 去掉所有 IF 配对 | 0.586 | 0.367 |
+| 去掉所有 Agent 配对 | 0.606 | 0.555 |
 
-The apparent advantage depends on which experts/pairs are included. Directed
-pairs share experts and targets, so they are not 20 independent observations.
-This is a sensitivity check, not proof that the outlying pair should be
-discarded or that raw cosine is intrinsically better.
+表面上的优势取决于纳入了哪些专家/配对。有向配对之间共享专家与目标，因此它们不是 20 个独立观测。这是一项敏感性检查，**不是**证明那个离群配对应当被丢弃、也不是证明原始余弦本质上更好。
 
-Decision: use geometry only to nominate small, testable module corrections.
-Before making it part of coefficient selection, repeat on disjoint prompt
-batches and evaluate predictions on held-out domains/pairs.
+决策：只用几何来提名小的、可检验的模块级校正。在把它纳入系数选择之前，先在不相交的 prompt 批次上重复，并在留出的域/配对上评估预测。
 
-## IF module ablation remains incomplete
+## IF 模块消融仍然不完整
 
-Only the embedding correction has saved evaluations here, on reasoning tasks.
-Its -1.42 AVG5 change is uncertain, and there is no IF/Agent result establishing
-whether it protects the capability it was designed to help. Attention and MLP
-build definitions exist, but no corresponding saved evaluations were found.
+此处只有 embedding 校正保存了评测结果，且只在推理任务上。它的 −1.42 AVG5 变化不确定，而且**没有** IF/Agent 的结果能证明它保住了它被设计出来要去帮助的那个能力。attention 与 MLP 的构建定义是有的，但没有找到对应的已保存评测。
 
-Decision: evaluate all five domains before selecting a module correction.
-Embedding specificity alone does not justify amplification. Keep this extension
-behind the five-scalar control in the implementation order.
+决策：在选择任何模块级校正之前，先评测全部五个域。仅凭 embedding 的特异性不足以支撑放大。在实现顺序上，把这个扩展排在五标量对照组之后。
 
-## Implementation priority
+## 实施优先级
 
-Follow [the research plan](../notes/research_plan.md): obtain defensible
-validation/confirmation prompts, measure separate coefficient effects, fit and
-validate a constrained scalar selector, then admit module residuals only if
-they improve the scalar control. The current evidence supports this workflow;
-it does not establish that its future checkpoint will beat TA.
+遵循[研究计划](../notes/research_plan.md)：拿到站得住脚的验证/确认 prompt，测量各系数独立的效应，拟合并验证一个带约束的标量选择器，然后只有在模块残差能改进标量对照组时才纳入它们。现有证据支持这个工作流；它**并不**确立其未来的 checkpoint 会胜过 TA。

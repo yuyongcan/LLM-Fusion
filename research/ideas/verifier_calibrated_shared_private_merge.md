@@ -1,49 +1,42 @@
-# Verifier-Calibrated Shared/Private Merge (working proposal)
+# 验证器校准的共享/私有合并（工作提案）
 
-Status: historical proposal, superseded by
-[verifier-calibrated merge around TA](interaction_aware_merge.md). Shared/private
-decomposition is an optional future component, not the project's required
-outcome. No validated shared/private merge is implemented here.
+状态：历史提案，已被[围绕 TA 的验证器校准合并](interaction_aware_merge.md)取代。共享/私有分解是一个**可选的**未来组件，不是本项目必须产出的结果。此处没有实现任何已验证的共享/私有合并。
 
-## Motivation
+## 动机
 
-The reproduced 4B sweep shows that a single global coefficient under-scales some capabilities, while global parameter cosine does not explain all cross-domain gains. With five final task vectors, global cosine is 0.0222 for Math–Science, 0.0088 for Math–Code, and near zero for pairs involving IF or Agent. IF and Agent have essentially zero energy projection onto the span of the three reasoning vectors. Therefore, low global cosine cannot be interpreted as either irrelevance or independence in function space.
+复现得到的 4B 扫描显示：单一全局系数会**低估**某些能力的缩放，而全局参数余弦并不能解释全部的跨域增益。对于五个最终的 task vector，Math–Science 的全局余弦是 0.0222，Math–Code 是 0.0088，而涉及 IF 或 Agent 的配对近乎为零。IF 和 Agent 在三个推理向量张成的子空间上的能量投影基本为零。因此，低的全局余弦既不能解读为「无关」，也不能解读为「在函数空间中独立」。
 
-## Proposed representation
+## 提出的表示
 
-For each layer or matrix, decompose expert update `delta_i` into a stable component and a private residual. Candidate definitions will be compared rather than assumed:
+对每一层或每个矩阵，把专家更新 `delta_i` 分解为一个稳定分量和一个私有残差。候选定义要**相互比较**而非预先假定：
 
-1. Cross-expert spectral consensus: directions supported by multiple expert row/column subspaces.
-2. Training-trajectory stability: directions whose sign/subspace persists across intermediate RL checkpoints.
-3. Functional sensitivity: directions producing consistent logit or verifier changes on calibration prompts.
+1. 跨专家谱共识：被多个专家的行/列子空间共同支撑的方向。
+2. 训练轨迹稳定性：其符号/子空间在 RL 中间 checkpoint 上持续存在的方向。
+3. 功能敏感性：在校准 prompt 上产生一致的 logit 或验证器变化的方向。
 
-The merged update is
+合并后的更新为
 
-`delta_merge = alpha_shared * shared + sum_i alpha_i * private_i`.
+`delta_merge = alpha_shared * shared + sum_i alpha_i * private_i`。
 
-Shared components are counted once; private components retain independent scales.
+共享分量只计一次；私有分量保留各自独立的缩放系数。
 
-## Adaptive nonlinear calibration
+## 自适应非线性校准
 
-Use small, fixed calibration subsets sampled from the original training corpora, never the final benchmarks. Evaluate a space-filling set of coefficient vectors and fit, for each domain, a regularized quadratic surrogate:
+使用从原始训练语料中采样的小型固定校准子集，**绝不使用**最终的 benchmark。评估一组空间填充的系数向量，并为每个域拟合一个带正则化的二次代理模型：
 
-`reward_d(alpha) = b_d + g_d^T alpha + 0.5 * alpha^T H_d alpha`.
+`reward_d(alpha) = b_d + g_d^T alpha + 0.5 * alpha^T H_d alpha`。
 
-The off-diagonal terms explicitly model the observed possibility that near-orthogonal experts interact functionally. Select coefficients by maximizing normalized mean reward subject to a worst-domain retention constraint and a response-length penalty. This makes the method verifier-supervised but requires no gradient updates to model parameters.
+非对角项显式地建模这样一种已观察到的可能性：近乎正交的专家在功能上仍会相互作用。通过最大化归一化均值 reward 来选系数，同时受最差域保留率约束和回答长度惩罚的约束。这使得该方法由验证器监督，但不需要对模型参数做任何梯度更新。
 
-## Required controls
+## 必需的对照组
 
-- Uniform Task Arithmetic at matched global update norm.
-- Fixed-coefficient leave-one-in/out merges.
-- Task-wise scalar search without decomposition.
-- RAM and ResMerge, if their released implementations support these checkpoints.
-- Shared-only and private-only ablations.
-- Equal inference budget and reporting of response length/truncation.
+- 匹配全局 update norm 的统一 Task Arithmetic。
+- 固定系数的 leave-one-in/out 合并。
+- 不做分解的逐任务标量搜索。
+- RAM 与 ResMerge，前提是它们公开的实现能支持这些 checkpoint。
+- 仅共享分量与仅私有分量的消融。
+- 等量的推理预算，并报告回答长度/截断率。
 
-## Evidence threshold
+## 证据门槛
 
-A promising result must improve over uniform TA and task-wise scalar calibration
-on newly reserved evaluation prompts, retain every domain within a predeclared
-tolerance, and reproduce across independent decoding seeds. The existing public
-benchmarks have already influenced selection and cannot serve as untouched
-evaluation. Follow the current research plan for the prospective protocol.
+一个有希望的结果必须在新预留的评测 prompt 上优于统一 TA 和逐任务标量校准，把每个域都保留在预先声明的容差内，并且能在独立的解码种子上复现。现有的公开基准已经影响过选择过程，**不能**充当未被触碰过的评测集。前瞻性的协议遵循当前的研究计划。

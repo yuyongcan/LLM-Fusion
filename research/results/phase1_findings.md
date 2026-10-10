@@ -1,125 +1,89 @@
-# Phase 1 Findings
+# Phase 1 发现
 
-Updated: 2026-09-17. This file preserves the Phase 1 experiment narrative.
-See [current findings](current_findings.md) and
-[recomputed evidence](20260917_reassessment/tables.md) for the latest synthesis
-and uncertainty. All public-benchmark screens below are development evidence.
+更新于 2026-09-17。本文件保留 Phase 1 的实验叙述。
+最新的综合与不确定性见[current findings](current_findings.md)和
+[重算证据](20260917_reassessment/tables.md)。以下所有公开基准筛选都属于开发证据。
 
-## Reproduction anchor
+## 复现锚点
 
-The reproduced 4B base, diagonal experts, and released five-expert TA (`lambda=0.6`) match the paper within roughly 0.2 AVG8 points. This makes the local setup suitable for controlled follow-up experiments.
+复现得到的 4B base、各域专家的对角表现，以及已发布的五专家 TA（`lambda=0.6`），与论文在约 0.2 个 AVG8 点以内吻合。这使得本地环境适合做受控的后续实验。
 
-## Geometry
+## 几何
 
-- Global task-vector cosine is small even among reasoning experts: Math–Science `0.0222`, Math–Code `0.0088`, Science–Code `0.0023`.
-- Pairs involving IF or Agent are nearly orthogonal globally. Their projection energy onto the M/S/C span is effectively zero.
-- Local matrix structure is stronger than global geometry: selected attention tensors reach cosine around `0.1`, while different modules and layers contain both positive and negative alignment.
-- Global parameter cosine only moderately correlates with directed cross-domain transfer (`r≈0.39`; layer 16 `r≈0.41`). It is informative but insufficient.
+- 即便在推理专家之间，全局 task-vector 余弦也很小：Math–Science `0.0222`、Math–Code `0.0088`、Science–Code `0.0023`。
+- 涉及 IF 或 Agent 的配对在全局上近乎正交。它们投射到 M/S/C 张成空间上的能量实际上为零。
+- 局部矩阵结构强于全局几何：选定的 attention 张量余弦可达约 `0.1`，而不同的模块与层同时包含正向与负向的对齐。
+- 全局参数余弦与有向跨域迁移只有中等强度的相关（`r≈0.39`；第 16 层 `r≈0.41`）。它有信息量，但不充分。
 
-## Norm-matched expert-subset screening (`n=4`)
+## 范数匹配的专家子集筛选（`n=4`）
 
-All subset updates were scaled to the same task-vector norm as five-expert TA at `lambda=1.0`.
+所有子集更新都被缩放到与五专家 TA 在 `lambda=1.0` 下相同的 task-vector 范数。
 
-| Model | Reasoning AVG5 | Mean tokens | Truncation |
+| 模型 | 推理 AVG5 | 平均 token | 截断率 |
 |---|---:|---:|---:|
 | M/S/C | 60.55 | 6,926 | 7.09% |
 | M/S/C + IF | 61.71 | 5,916 | 1.98% |
 | M/S/C + Agent | 62.28 | 7,308 | 5.97% |
-| All five | 62.67 | 6,476 | 2.75% |
+| 全部五个 | 62.67 | 6,476 | 2.75% |
 
-Relative to norm-matched M/S/C, adding IF gives `+1.16` points and adding Agent
-gives `+1.73`; all five give `+2.12`. With only four samples per prompt, these
-are screening signals rather than confirmation. The point estimates motivate
-effects beyond total update norm, but do not exclude sampling variation. IF
-also reduces response length and cap hits, which may itself help code accuracy.
+相对范数匹配的 M/S/C，加入 IF 给出 `+1.16` 点，加入 Agent 给出 `+1.73`；五个全加给出 `+2.12`。由于每条 prompt 只有四个样本，这些是**筛选信号**而非确认。点估计提示存在超出总更新范数的效应，但不排除采样变异。IF 还降低了回答长度与触顶率，这本身可能有助于代码准确率。
 
-## Support-overlap diagnosis
+## 支撑重叠诊断
 
-RAM-style hard support is unstable under the activation threshold. For IF, the fraction of update energy classified as unique changes from `1.0%` at `1e-6`, to `7.2%` at `1e-5`, to `41.8%` at `2e-5`. The corresponding global partition shifts from 69.2% of coordinates active in all experts to only 0.05%. Any hard-threshold shared/private claim must therefore include sensitivity analysis.
+RAM 式的硬支撑在激活阈值下是不稳定的。对 IF 而言，被归类为独有的更新能量占比从 `1e-6` 时的 `1.0%`，变到 `1e-5` 时的 `7.2%`，再到 `2e-5` 时的 `41.8%`。相应的全局划分从「69.2% 的坐标在所有专家中都激活」变成只有 0.05%。因此，任何基于硬阈值的共享/私有主张都必须附带敏感性分析。
 
-IF has unusually concentrated private support in embeddings: at threshold `1e-5`, about 57% of embedding-update energy is classified unique, versus roughly 4–9% globally. This motivates module-aware treatment of IF rather than a uniform expert scalar.
+IF 在 embedding 上有异常集中的私有支撑：在阈值 `1e-5` 下，约 57% 的 embedding 更新能量被归类为独有，而全局只有约 4–9%。这启发了对 IF 做模块感知的处理，而不是用一个统一的专家标量。
 
-## Working interpretation
+## 工作性解读
 
-Low global cosine does not imply functional irrelevance. However, the evidence
-does not establish a literal shared parameter vector between IF/Agent and
-reasoning. Benefits may arise from input-conditioned nonlinear effects,
-length/style control, or localized module interactions. The continuous
-sharedness candidate was subsequently screened and did not improve TA; the
-active plan now prioritizes verifier-calibrated coefficients.
+低的全局余弦并不蕴含功能上的无关性。然而，证据**并未**确立 IF/Agent 与推理域之间存在一个字面意义上的共享参数向量。收益可能来自输入条件下的非线性效应、长度/风格控制，或局部化的模块交互。连续的共享性候选方法随后做了筛选，没有改善 TA；当前活跃的计划优先做验证器校准的系数。
 
-## Fixed-coefficient factorial control (`lambda=1`, `n=4`)
+## 固定系数析因对照（`lambda=1`，`n=4`）
 
-| Model | Reasoning AVG5 | Mean tokens | Truncation |
+| 模型 | 推理 AVG5 | 平均 token | 截断率 |
 |---|---:|---:|---:|
 | M/S/C | 62.51 | 5,932 | 2.63% |
 | M/S/C + IF | 61.91 | 5,777 | 1.48% |
 | M/S/C + Agent | 62.43 | 6,517 | 3.41% |
-| All five | 64.50 | 6,407 | 2.65% |
+| 全部五个 | 64.50 | 6,407 | 2.65% |
 
-At the same coefficient, IF alone changes AVG5 by `-0.60` and Agent alone by `-0.08`, but adding both changes it by `+1.99`. The factorial interaction
+在相同系数下，单独加 IF 使 AVG5 变化 `-0.60`，单独加 Agent 变化 `-0.08`，但两者都加则变化 `+1.99`。析因交互项
 
 `All5 - (MCS+IF) - (MCS+Agent) + MCS`
 
-is `+2.67` AVG5 points, concentrated in AIME and GPQA; it is approximately zero
-on the two code benchmarks. This suggested an interaction to test, without
-establishing a higher-order mechanism. Because the run uses only four samples
-per prompt, the rough AVG5 standard error is about `1.98` points; the larger
-diagnostic below does not confirm a stable positive effect.
+为 `+2.67` 个 AVG5 点，集中在 AIME 与 GPQA；在两个代码基准上近似为零。这提示了有一个交互值得检验，但**没有**确立一个更高阶的机制。由于该运行每条 prompt 只用四个样本，AVG5 的粗略标准误约为 `1.98` 点；下面那个更大的诊断并没有确认存在稳定的正效应。
 
-An additive parameter merge can have nonlinear, subset-dependent verifier
-responses. Optimizing expert coefficients with a suitable response model can
-account for these effects without constructing an interaction vector. The
-method target remains improved measured performance, not mandatory interactions.
+一个加性的参数合并完全可以具有非线性的、依赖子集的验证器响应。用合适的响应模型去优化专家系数，就能解释这些效应，而无需构造一个交互向量。方法目标仍然是改进实测表现，而不是强制要有交互。
 
-## Factorial confirmation (`lambda=1`, `n=16`)
+## 析因确认（`lambda=1`，`n=16`）
 
-The larger run weakens the exploratory interaction claim:
+更大的那次运行削弱了探索性的交互主张：
 
-| Model | AIME25 | AIME26 | GPQA | AVG3 |
+| 模型 | AIME25 | AIME26 | GPQA | AVG3 |
 |---|---:|---:|---:|---:|
 | M/S/C | 52.50 | 62.50 | 64.08 | 59.69 |
 | M/S/C + IF | 54.79 | 59.79 | 64.30 | 59.63 |
 | M/S/C + Agent | 53.54 | 63.12 | 64.33 | 60.33 |
-| All five | 58.75 | 61.67 | 63.57 | 61.33 |
+| 全部五个 | 58.75 | 61.67 | 63.57 | 61.33 |
 
-The factorial interaction is `+2.92`, `+1.25`, and `-0.98` points on the three
-benchmarks, respectively, or `+1.06` AVG3. The original prompt bootstrap gave
-`[-1.20, +3.55]`; the unified reanalysis gives `[-1.26, +3.54]`. All five exceeds
-M/S/C by a point estimate of `+1.64` AVG3, but its interval `[-0.62, +4.02]`
-also spans zero. Neither effect is confirmed. Explicit pairwise components
-remain optional and require evidence on calibration validation.
+析因交互项在三个基准上分别是 `+2.92`、`+1.25` 和 `-0.98` 点，即 `+1.06` AVG3。最初的 prompt bootstrap 给出
+`[-1.20, +3.55]`；统一重分析给出 `[-1.26, +3.54]`。全五专家以点估计 `+1.64` AVG3 超过 M/S/C，但其区间 `[-0.62, +4.02]` 同样跨越零点。两个效应都**未**得到确认。显式的成对分量仍然是可选的，并且需要在校准验证集上有证据。
 
-## Continuous geometry and null-model check
+## 连续几何与零模型校验
 
-Threshold-free coordinate statistics show pairwise absolute cosine near
-`0.63`, despite signed cosine near zero. This initially resembles common
-magnitude support, but an independent Gaussian null has expected absolute
-cosine `2/pi = 0.6366` and nearly matching effective-expert statistics. Dense
-attention and MLP task vectors are therefore close to random-independent at
-the coordinate level, not demonstrably shared. Embeddings are substantially
-more task-specific, especially for IF and Agent.
+无阈值的坐标统计显示，两两绝对余弦接近 `0.63`，尽管带符号的余弦接近零。这初看上去像是共同的幅值支撑，但独立高斯零假设的期望绝对余弦就是 `2/pi = 0.6366`，且有效专家数统计量也几乎吻合。因此，稠密的 attention 与 MLP task vector 在坐标层面接近随机独立，**并非**可证明地共享。Embedding 则显著地更具任务特异性，对 IF 和 Agent 尤其如此。
 
-This weakens absolute overlap as the proposed method's main signal. The
-subsequent `delta_W x` analysis is complete, but its global correlation advantage
-does not survive several sensitivity checks. Any proposed decomposition still
-needs direct verifier validation and should recover TA at its null correction.
+这削弱了把绝对重叠当作所提方法主要信号的做法。后续的 `delta_W x` 分析已完成，但它的全局相关性优势在多项敏感性检查中不成立。任何提出的分解仍然需要直接的验证器校验，并且应当在其零校正处还原为 TA。
 
-## Strong static baselines (`n=4`, reasoning suite)
+## 强静态基线（`n=4`，推理套件）
 
-| Model | Reasoning AVG5 | Mean tokens | Truncation |
+| 模型 | 推理 AVG5 | 平均 token | 截断率 |
 |---|---:|---:|---:|
 | TA, `lambda=1` | 64.50 | 6,407 | 2.65% |
 | RAM+ | 58.61 | 4,738 | 2.29% |
-| RAM+, norm matched | 61.98 | 5,131 | 0.55% |
+| RAM+，范数匹配 | 61.98 | 5,131 | 0.55% |
 | ResMerge | 56.05 | 4,828 | 4.61% |
-| ResMerge, norm matched | 62.16 | 5,895 | 0.76% |
-| Soft-Overlap, norm matched | 60.05 | 5,115 | 0.55% |
+| ResMerge，范数匹配 | 62.16 | 5,895 | 0.76% |
+| Soft-Overlap，范数匹配 | 60.05 | 5,115 | 0.55% |
 
-The deployed update norms relative to the bf16 base are `2.228` (TA), `0.714`
-(RAM+), `0.271` (ResMerge), and `2.163` (Soft-Overlap). Norm-matched controls
-are now complete and recover much of RAM+/ResMerge's loss. Their remaining
-gaps are `-2.52` (CI `[-4.71, -0.42]`) and `-2.34` (CI `[-4.77, +0.05]`).
-Soft-Overlap trails TA by `4.46` points using unrounded scores. Reject that
-tested configuration as the primary candidate; retain scaled baselines and
-report their lower generation cost. This does not reject either method family.
+相对 bf16 base 的已部署更新范数为 `2.228`（TA）、`0.714`（RAM+）、`0.271`（ResMerge）和 `2.163`（Soft-Overlap）。范数匹配对照现已完成，并挽回了 RAM+/ResMerge 的大部分损失。它们残余的差距是 `-2.52`（CI `[-4.71, -0.42]`）和 `-2.34`（CI `[-4.77, +0.05]`）。Soft-Overlap 用未舍入的分数计落后 TA `4.46` 个点。否决那个被测试的配置作为主候选；保留 scaled 基线并报告它们更低的生成开销。这并不否决任何一个方法族。

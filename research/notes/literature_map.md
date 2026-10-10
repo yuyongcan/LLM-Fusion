@@ -1,53 +1,38 @@
-# Literature Map: Adaptive and Structured Model Merging
+# 文献地图：自适应与结构化模型合并
 
-Updated: 2026-09-16. Searches used the arXiv API and full arXiv HTML/source where available.
+更新于 2026-09-16。检索使用了 arXiv API 以及可用的 arXiv 全文 HTML/源码。
 
-## Closest prior work
+## 最相近的前人工作
 
-| Work | Core idea | Data needed | Relation to this project |
+| 工作 | 核心思想 | 是否需要数据 | 与本项目关系 |
 |---|---|---:|---|
-| Task Arithmetic, arXiv:2212.04089 | Add scaled task vectors | No | Current baseline; one global scale |
-| AdaMerging, arXiv:2310.02575 | Learn task-wise or layer-wise coefficients by entropy minimization | Unlabeled test inputs | Covers generic adaptive coefficients |
-| TALL-masks / Consensus Merging, arXiv:2405.07813 | Identify task-relevant coordinates; retain parameters supported by multiple tasks | Validation data for mask threshold | Covers coordinate-level shared/private support |
-| MetaGPT, arXiv:2406.11385 | Closed-form task coefficients derived under local linearity and orthogonality | No | Covers norm-based per-task coefficients |
-| Adaptive Weight Disentanglement, arXiv:2411.18729 | Learn a redundant vector whose removal orthogonalizes task vectors | No task data | Covers common-vector subtraction |
-| Isotropic Model Merging, arXiv:2502.04959 | Combine common and task-specific singular subspaces | No | Covers static spectral shared/private decomposition |
-| Subspace Boosting, arXiv:2506.16506 | Restore task-specific spectral rank lost when common directions dominate | No | Covers rank-collapse correction |
-| RAM, arXiv:2601.13572 | For RL experts, average shared active coordinates and preserve/rescale unique ones | No | Closest coordinate-space RL-specific baseline |
-| SVC, arXiv:2602.05536 | Detect and correct shared spectral over-accumulation after merging | No | Closest projection-preservation/spectral-calibration baseline |
-| ResMerge, arXiv:2606.02252 | Split RL task matrices into spectral head and residual; merge them with different rules | No | Closest RL-specific spectral baseline |
-| SAR, arXiv:2607.03065 | Project RL updates into the base model's spectral basis | No | Relevant to reasoning-effective versus off-manifold updates |
-| Expert Training Duration, arXiv:2607.11997 | Shows merge quality depends on expert checkpoint age | No additional training | Motivates trajectory analysis but does not decompose one trajectory into components |
-| Sparsity Curse / SAR-Merging, arXiv:2606.18521 | Resolve overlapping RLVR updates with diagonal-Fisher sensitivity, then sparsify and rescale private regions | Small validation set | Covers RLVR-specific sensitivity-aware conflict arbitration |
-| Essential Subspace Merging, arXiv:2606.19164 | Decompose each task matrix using PCA of output shifts `X Delta W^T`; orthogonalize retained components | Unlabeled proxy inputs | Directly covers activation-aware task-vector decomposition |
-| When Do Task Vectors Interfere?, arXiv:2608.09490 | Measure input-conditioned non-additivity with two-dimensional coefficient surfaces and logit-space counterfactuals | Prompt sets | Closest analysis of functional pair interactions; diagnostic rather than a merge optimizer |
+| Task Arithmetic, arXiv:2212.04089 | 把缩放后的 task vector 相加 | 否 | 当前基线；单一全局缩放 |
+| AdaMerging, arXiv:2310.02575 | 通过熵最小化学习逐任务或逐层系数 | 无标签测试输入 | 覆盖通用的自适应系数 |
+| TALL-masks / Consensus Merging, arXiv:2405.07813 | 识别任务相关坐标；保留被多个任务支撑的参数 | 用于 mask 阈值的验证数据 | 覆盖坐标级的共享/私有支撑 |
+| MetaGPT, arXiv:2406.11385 | 在局部线性与正交性假设下导出闭式的任务系数 | 否 | 覆盖基于范数的逐任务系数 |
+| Adaptive Weight Disentanglement, arXiv:2411.18729 | 学一个冗余向量，去掉它即可使 task vector 正交化 | 无任务数据 | 覆盖公共向量相减 |
+| Isotropic Model Merging, arXiv:2502.04959 | 组合公共与任务特定的奇异子空间 | 否 | 覆盖静态的谱共享/私有分解 |
+| Subspace Boosting, arXiv:2506.16506 | 恢复因公共方向主导而丢失的任务特定谱秩 | 否 | 覆盖秩塌缩校正 |
+| RAM, arXiv:2601.13572 | 对 RL 专家，平均共享的激活坐标并保留/重缩放独有坐标 | 否 | 最相近的坐标空间、RL 专用基线 |
+| SVC, arXiv:2602.05536 | 检测并校正合并后共享谱的过度累积 | 否 | 最相近的投影保持/谱校准基线 |
+| ResMerge, arXiv:2606.02252 | 把 RL 任务矩阵拆成谱头与残差，用不同规则合并 | 否 | 最相近的 RL 专用谱方法基线 |
+| SAR, arXiv:2607.03065 | 把 RL 更新投影到基座模型的谱基上 | 否 | 关乎「推理有效」与「流形外」的更新 |
+| Expert Training Duration, arXiv:2607.11997 | 表明合并质量依赖于专家 checkpoint 的「年龄」 | 无需额外训练 | 启发轨迹分析，但不把单条轨迹分解为分量 |
+| Sparsity Curse / SAR-Merging, arXiv:2606.18521 | 用对角 Fisher 敏感性仲裁重叠的 RLVR 更新，再稀疏化并重缩放私有区域 | 小验证集 | 覆盖 RLVR 专用的敏感性感知冲突仲裁 |
+| Essential Subspace Merging, arXiv:2606.19164 | 用输出位移 `X Delta W^T` 的 PCA 分解每个任务矩阵；对保留分量做正交化 | 无标签代理输入 | 直接覆盖激活感知的 task vector 分解 |
+| When Do Task Vectors Interfere?, arXiv:2608.09490 | 用二维系数曲面与 logit 空间反事实来测量输入条件下的非加性 | prompt 集 | 最相近的功能成对交互分析；属诊断而非合并优化器 |
 
-## Novelty boundary
+## 新颖性边界
 
-This section concerns a potential publication contribution. The primary
-engineering objective is to implement a better measured merge; it does not
-require inventing a new decomposition. Literature conclusions below are the
-existing reading record, not a newly verified exhaustive search.
+本节关乎潜在的发表贡献。首要的**工程**目标是实现一个实测更优的合并；它并不要求发明一种新的分解。下面的文献结论属于既有的阅读记录，不是新做的穷尽检索。
 
-The following ideas alone are not sufficiently novel: assigning one coefficient per expert, assigning one coefficient per layer, splitting coordinates into shared/unique support, subtracting a common redundant vector, or separating leading singular directions from residuals.
+仅靠以下想法不足以构成新颖性：给每个专家配一个系数、给每层配一个系数、把坐标划分为共享/独有支撑、减去一个公共冗余向量、或把主导奇异方向与残差分开。
 
-A more differentiated direction is **verifier-calibrated, robust merging for RLVR experts**:
+一个更具区分度的方向是 **面向 RLVR 专家的、验证器校准的鲁棒合并**：
 
-1. Use weight/trajectory geometry to define a small number of interpretable components rather than thousands of free coefficients.
-2. Estimate domain-specific response surfaces directly with the native RLVR
-   verifiers on training-only calibration prompts.
-3. Fit a nonlinear response surface over component coefficients and optimize a robust objective that rewards average gain, protects the weakest domain, and penalizes excessive generation length.
-4. Evaluate once on newly reserved prompts after freezing the method. Existing
-   public benchmarks already used for selection remain development data.
+1. 用权重/轨迹几何定义**少量可解释的分量**，而不是成千上万个自由系数。
+2. 直接用原生 RLVR 验证器、在**仅用于训练**的校准 prompt 上估计各域的响应曲面。
+3. 在分量系数上拟合非线性响应曲面，并优化一个鲁棒目标：奖励平均增益、保护最弱的域、并惩罚过长的生成。
+4. 在冻结方法之后，于新预留的 prompt 上**只评测一次**。已用于选择的公开基准仍然是开发数据。
 
-Activation-aware decomposition alone is no longer a viable novelty claim because
-ESM already optimizes low-rank approximation of `Delta W x`. Likewise,
-functional non-additivity itself is covered by arXiv:2608.09490. The remaining
-gap is to use the defining property of RLVR—domain-specific executable or rule
-verifiers—to choose a single static merge under explicit worst-domain and
-generation-budget constraints. This differs from AdaMerging's entropy
-objective, SAR's Fisher conflict arbitration, and generic black-box coefficient
-search. Any interaction term must earn inclusion on calibration validation
-rather than being assumed from parameter geometry. This possible gap is a
-hypothesis for positioning, not an established novelty claim or a requirement
-that the first useful implementation contain interactions.
+仅靠激活感知的分解已不足以构成新颖性主张，因为 ESM 已经优化了 `Delta W x` 的低秩近似。同样，功能非加性本身已被 arXiv:2608.09490 覆盖。剩下的缺口是：利用 RLVR 的定义性特征 —— **域特定的可执行或规则型验证器** —— 在显式的最差域约束与生成预算约束下选出一个静态合并。这区别于 AdaMerging 的熵目标、SAR 的 Fisher 冲突仲裁，以及通用的黑盒系数搜索。任何交互项都必须在校准验证上挣得被纳入的资格，而不能由参数几何假定出来。这个可能的缺口只是一个用于定位的假设，**不是**已确立的新颖性主张，也不要求第一个有用的实现里必须包含交互项。

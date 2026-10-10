@@ -1,74 +1,48 @@
-# Research State
+# 研究状态
 
-Updated: 2026-09-17
+更新时间：2026-09-17
 
-## Goal and status
+## 目标与现状
 
-Develop a reproducibly better and academically novel static five-expert model
-merge. See
-[the research plan](notes/research_plan.md) for prospective acceptance criteria
-and [current findings](results/current_findings.md) for the evidence. No method
-has yet demonstrated a confirmed improvement over the strongest eligible
-baseline across all five domains.
+开发一个可复现地更优、且在学术上具有新颖性的静态五专家模型合并方法。前瞻性的验收标准见
+[研究计划](notes/research_plan.md)，证据见[当前发现](results/current_findings.md)。目前还没有任何方法在所有五个域上相对最强基线表现出**已确认**的提升。
 
-The active hypothesis is VICP. Per-expert coefficient calibration is retained
-matrix; it is not sufficient for a novelty claim.
-only as a control and as the cheapest estimator of a first verifier-influence
+当前活跃的假设是 VICP。逐专家系数校准仅作为**对照组**以及"首个验证器影响力估计量"的最廉价实现而保留；它本身不足以支撑创新性主张。
 
-## Resource guard (historical record, not a live status)
+## 资源占用记录（历史记录，不是实时状态）
 
-- Cluster: 4 nodes × 8 H20 GPUs.
-- Last recorded holder node: `28.45.1.61` when it was not running an evaluation.
-- Command: `gpu_hold.py --gpus 0,1,2,3,4,5,6,7 --util 100 --mem 2048`.
-- Parent PID file: `/tmp/llm_fusion_gpu_hold.pid` on that node.
-- Log: `/tmp/llm_fusion_gpu_hold.log` on that node.
-- Historical stop command; recheck process identity before using it:
+- 集群：4 节点 × 8 张 H20 GPU。
+- 最后记录的占用节点：`28.45.1.61`（前提是它当时没在跑评测）。
+- 命令：`gpu_hold.py --gpus 0,1,2,3,4,5,6,7 --util 100 --mem 2048`。
+- 父进程 PID 文件：该节点上的 `/tmp/llm_fusion_gpu_hold.pid`。
+- 日志：该节点上的 `/tmp/llm_fusion_gpu_hold.log`。
+- 历史停止命令；使用前务必重新确认进程身份：
   `ssh 28.45.1.61 'kill "$(cat /tmp/llm_fusion_gpu_hold.pid)"'`
 
-The previous record lists PID `402651` and 100% utilization on all eight GPUs.
-The current documentation/CPU-analysis revision has not queried the cluster or
-verified that PID. Check live resources before scheduling or stopping jobs.
+先前的记录写着 PID `402651`、八张卡 100% 占用率。本轮文档/CPU 分析修订**并未**查询集群，也**没有**核实该 PID。排任务或停任务前请先确认实时资源占用。
 
-## Established baseline
+## 已确立的基线
 
-- The reproduced 4B base, diagonal per-domain experts, and five-expert Task Arithmetic at `lambda=0.6` match the paper within about 0.2 AVG8 points.
-- The observed best uniform coefficient on the current evaluation set is `lambda=1.0` (66.00 AVG8), but this is a development-set selection and increases generation length.
-- Raising only the IF coefficient from 1.0 to 1.2 improves IFBench by 2.69 points; the overall +0.33 AVG8 change is not yet statistically secure.
+- 复现得到的 4B base、各域专家的对角表现，以及 `lambda=0.6` 的五专家 Task Arithmetic，与论文在约 0.2 个 AVG8 点以内吻合。
+- 在当前评测集上观测到的最优统一系数是 `lambda=1.0`（66.00 AVG8），但这属于**开发集上的选择**，且会拉长生成长度。
+- 仅把 IF 系数从 1.0 提到 1.2 可使 IFBench 提升 2.69 个点；整体 +0.33 AVG8 的变化在统计上尚不牢靠。
 
-## Completed evidence
+## 已完成的证据
 
-- Recomputed 15 saved model/run entries in three suites from raw JSONL, with
-  source hashes and paired prompt-bootstrap intervals:
-  `results/20260917_reassessment/`.
-- RAM+/ResMerge norm-matched controls are complete: 61.98/62.16 reasoning AVG5
-  at n=4 versus TA 64.50. ResMerge's -2.34 pp interval includes zero. Retain
-  both scaled methods in the comparison set.
-- Soft-Overlap reaches 60.05; its current configuration is not the primary
-  method. Another TA run gives 62.67, emphasizing the need for repeated anchors.
-- Functional geometry is complete for 8 prompts and 64 tokens/domain. Its
-  transfer correlation advantage reverses in several sensitivity checks.
-- Uniform calibration at lambda=0.8/1.0/1.2 is complete: five-domain means
-  58.68/58.91/57.71. The lower coefficient is cheaper with an uncertain mean
-  score difference; the higher one improves IF but reduces Agent performance.
-- The manifest is frozen (SHA-256 prefix `b5f916f0`), with 128 source rows per
-  domain. Agent has 125 unique inputs. The split may include expert-training
-  examples and is pilot data, not a clean holdout.
-- n=16 factorial reanalysis: interaction +1.06, CI [-1.26, +3.54]; All5-MCS
-  +1.64, CI [-0.62, +4.02]. Neither is a confirmed positive effect.
-- IF embedding correction is screened on reasoning only (63.09 AVG5); its
-  IF/Agent outcome and the attention/MLP comparisons remain unmeasured here.
+- 从原始 JSONL 重算了三个套件中 15 条已保存的模型/运行记录，附带来源哈希与配对 prompt-bootstrap 区间：
+  `results/20260917_reassessment/`。
+- RAM+/ResMerge 的 norm-matched 对照已完成：n=4 下推理 AVG5 为 61.98/62.16，而 TA 是 64.50。ResMerge 的 −2.34 pp 区间包含零点。两个 scaled 方法都保留在对比集内。
+- Soft-Overlap 达到 60.05；其当前配置不是主方法。另一次 TA 跑出 62.67，说明重复锚点是必要的。
+- 功能几何（functional geometry）已完成 8 条 prompt、每域 64 token 的分析。其迁移相关性优势在多项敏感性检查中会反转。
+- lambda=0.8/1.0/1.2 的统一校准已完成：五域均值分别为 58.68/58.91/57.71。较低系数更省算力，但均值分数差异不确定；较高系数改善 IF 却拉低 Agent。
+- manifest 已冻结（SHA-256 前缀 `b5f916f0`），每域 128 条来源行。Agent 有 125 条去重输入。该划分**可能包含专家训练样本**，属于试点数据而非干净的留出集。
+- n=16 析因重分析：交互项 +1.06，CI [−1.26, +3.54]；All5-MCS +1.64，CI [−0.62, +4.02]。两者都不是已确认的正效应。
+- IF embedding 校正只在推理域上做过筛选（63.09 AVG5）；它在 IF/Agent 上的结果，以及与 attention/MLP 方案的对比，此处尚未测量。
 
-## Next implementation milestones
+## 后续实施里程碑
 
-1. Reserve new calibration validation and final confirmation prompts with
-   content/provenance checks. Existing public tests are development data.
-2. Execute the prepared 11 axial and 4 mixed coefficient settings in
-   `experiments/calibration/next_design.json`, recording per-domain reward,
-   generation cost, seeds, and post-export norms. These settings are not run.
-3. Implement a regularized, constrained scalar selector and validate its
-   actual merged checkpoint against calibrated uniform TA. The three existing
-   uniform points cannot identify independent expert effects.
-4. Add at most two module residuals only if they beat the scalar control at
-   equal calibration cost; evaluate IF and Agent directly.
-5. Freeze the best candidate and baselines, then perform independent
-   confirmation and repeated decoding. No independent confirmation is complete.
+1. 预留新的校准验证集与最终确认集 prompt，并做内容/来源检查。现有的公开测试集属于开发数据。
+2. 执行 `experiments/calibration/next_design.json` 中已准备好的 11 个轴向与 4 个混合系数组合，记录每域 reward、生成开销、随机种子和导出后的范数。这些组合**尚未运行**。
+3. 实现一个带正则化、带约束的标量选择器，并用它真实产出的合并 checkpoint 与校准过的统一 TA 对比。现有三个统一系数点无法识别各专家的独立效应。
+4. 只有在同等校准开销下胜过标量对照组时，才最多增加两个模块级残差；并且要直接评测 IF 和 Agent。
+5. 冻结最优候选与基线，然后做独立确认与重复解码。目前**没有任何**独立确认已完成。

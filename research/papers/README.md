@@ -1,4 +1,3 @@
-# Literature Index
+# 文献索引
 
-Papers, metadata, and reading notes relevant to shared/private task-vector decomposition and adaptive model merging are collected here. Each entry should record the source URL, publication status, method family, supervision/data requirements, and the closest overlap with the proposed method.
-
+这里收集与「共享/私有 task vector 分解」以及「自适应模型合并」相关的论文、元数据和阅读笔记。每条记录都应写明来源 URL、发表状态、方法族、所需的监督信号/数据，以及与本方法的最大重叠点。

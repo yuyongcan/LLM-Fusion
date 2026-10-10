@@ -1,21 +1,17 @@
-# Session Findings — 2026-09-20
+# 阶段性发现 — 2026-09-20
 
-Analysis of the merge / distillation / mixed-RL comparison on Qwen3-4B-Instruct-2507.
-Covers five threads: arithmetic errors in the reported table, what merging
-actually buys (pass@16), why mixed-domain RL underperforms, the weight-space
-geometry, and a numerical-precision problem that affects how coefficient sweeps
-should be read.
+对 Qwen3-4B-Instruct-2507 上「合并 / 蒸馏 / 混合 RL」三方对比的分析。
+涵盖五条线索：已报告表格中的算术错误、合并究竟买到了什么（pass@16）、为什么混合域 RL 表现不佳、权重空间的几何，以及一个影响「系数扫描该如何解读」的数值精度问题。
 
-Status: findings 1–5 are established. The extrapolation (H1) and projection (H2)
-screens were still running when this was written — see [Open experiments](#open-experiments).
+状态：发现 1–5 已确立。外推（H1）与投影（H2）筛选在本文写作时仍在运行 —— 见[未完成的实验](#未完成的实验)。
 
 ---
 
-## 1. Six AVG8 values in the reported table are wrong
+## 1. 已报告表格中有六个 AVG8 值是错的
 
-Recomputing the mean of the eight benchmark columns:
+重算八列基准的均值：
 
-| row | reported | recomputed | delta |
+| 行 | 已报告 | 重算 | 差值 |
 |---|---:|---:|---:|
 | expert_if | 54.75 | **59.14** | +4.39 |
 | expert_agent | 56.82 | **58.85** | +2.03 |
@@ -24,25 +20,20 @@ Recomputing the mean of the eight benchmark columns:
 | **merge5_c1.0** | **67.51** | **66.00** | **−1.51** |
 | merge5_c1.2 | 66.75 | 65.08 | −1.67 |
 
-The other twelve rows check out. Two of these change conclusions:
+其余十二行核对无误。其中有两个会改变结论：
 
-- `expert_if` is not the worst expert. At 59.14 it is mid-pack: its bfcl collapse
-  (−10.8) is more than offset by ifbench (+18.2) and ifeval (+5.9).
-- `merge5_c1.0` is 66.00, not 67.51. That cuts its margin over `MOPD_merge1.0`
-  from 2.06 to **0.55** — within noise on eight benchmarks, so the two should be
-  described as comparable rather than merge being ahead.
+- `expert_if` **不是**最差的专家。59.14 处在中游：它的 bfcl 崩塌（−10.8）被 ifbench（+18.2）和 ifeval（+5.9）绰绰有余地抵消了。
+- `merge5_c1.0` 是 66.00，不是 67.51。这把它相对 `MOPD_merge1.0` 的优势从 2.06 砍到 **0.55** —— 在八个基准上处于噪声范围内，所以两者应当被描述为「相当」，而不是合并领先。
 
-Everything below uses recomputed values. **Check whichever script or spreadsheet
-produced the published averages before reporting them.**
+以下全部使用重算后的数值。**在报告之前，请核查究竟是哪个脚本或电子表格产出了那些已发布的平均值。**
 
 ---
 
-## 2. Merging sharpens the output distribution; it does not add capability
+## 2. 合并是锐化了输出分布，而非增加了能力
 
-The `n16` evals record `best@16` (= pass@16) alongside `mean@16`, which separates
-"solves more problems" from "solves the same problems more reliably".
+`n16` 评测在 `mean@16` 之外还记录了 `best@16`（= pass@16），这把「解出更多题」与「把同样的题解得更稳」区分开来。
 
-| model | aime25 mean@16 | aime25 pass@16 | lcb_v5 mean@16 | lcb_v5 pass@16 | gpqa mean@16 | gpqa pass@16 |
+| 模型 | aime25 mean@16 | aime25 pass@16 | lcb_v5 mean@16 | lcb_v5 pass@16 | gpqa mean@16 | gpqa pass@16 |
 |---|---:|---:|---:|---:|---:|---:|
 | base | 47.08 | 71.46 | 58.78 | 79.28 | 56.69 | 83.89 |
 | expert_math | 51.25 | **77.65** | 60.07 | 80.06 | 61.55 | 86.33 |
@@ -50,53 +41,37 @@ The `n16` evals record `best@16` (= pass@16) alongside `mean@16`, which separate
 | mcs3_c1.0 | **55.63** | 74.97 | **67.10** | 83.87 | **63.60** | 88.02 |
 | MOPD_merge1.0 | 53.75 | 76.50 | **67.44** | 83.98 | **64.49** | 85.95 |
 
-`mcs3_c1.0` has the best aime25 mean@16 in this group but a **lower** pass@16
-than `expert_math` (74.97 vs 77.65). Aggregated over the family:
+`mcs3_c1.0` 在这一组里 aime25 的 mean@16 最好，但 pass@16 却**低于** `expert_math`（74.97 对 77.65）。在整个方法族上聚合：
 
-| family | mean@16 gain | pass@16 gain |
+| 方法族 | mean@16 增益 | pass@16 增益 |
 |---|---:|---:|
-| mcs3, base → c=1.0 | +4.73 | +1.81 |
-| merge5, c=0.4 → c=1.0 | +5.37 | +3.62 |
+| mcs3，base → c=1.0 | +4.73 | +1.81 |
+| merge5，c=0.4 → c=1.0 | +5.37 | +3.62 |
 
-About **60% of the mean@16 gain is pure sharpening** — no expansion of the solved
-set. And merge5's pass@16 gain is almost entirely one column: ifbench
-+19.0 (46.91 → 65.87 across the sweep), while gpqa pass@16 actually *declines*
-(87.29 → 86.16) and lcb_v5 gains only 3.1.
+mean@16 增益中约 **60% 是纯粹的锐化** —— 解出的题集并没有扩大。而 merge5 的 pass@16 增益几乎全部来自一列：ifbench +19.0（整个扫描中 46.91 → 65.87），而 gpqa 的 pass@16 实际上*下降*了（87.29 → 86.16），lcb_v5 只涨了 3.1。
 
-**Implication.** Instruction-following is the one axis where merging genuinely
-widens the capability frontier. On reasoning axes the coefficient is a sharpness
-knob over a fixed frontier. This is good news for distillation: sharpening is
-exactly what a mode-seeking objective can reproduce, and `MOPD_merge1.0` already
-exceeds its merge counterparts on lcb_v5 (67.44) and gpqa (64.49) mean@16.
+**含义。** 指令遵循是合并真正拓宽了能力前沿的唯一一条轴。在推理轴上，系数是在一个固定前沿上的**锐度旋钮**。这对蒸馏是个好消息：锐化恰恰是 mode-seeking 目标所能复现的东西，而 `MOPD_merge1.0` 在 lcb_v5（67.44）和 gpqa（64.49）的 mean@16 上已经超过了它的合并对手。
 
-### The c=1.2 regression is not capability damage
+### c=1.2 的回落不是能力受损
 
-| | c=1.0 | c=1.2 | delta |
+| | c=1.0 | c=1.2 | 差值 |
 |---|---:|---:|---:|
 | aime25 mean@16 | 57.08 | 51.67 | **−5.41** |
 | aime25 pass@16 | 77.42 | 75.13 | −2.29 |
 | gpqa mean@16 | 64.93 | 63.76 | −1.17 |
 | gpqa pass@16 | 87.07 | 86.16 | −0.91 |
 
-pass@16 barely moves while mean@16 drops 5.4 — the ability is intact, pass@1 is
-just less reliable. c=1.2 **de-sharpens**; it does not destroy the math direction.
-Meanwhile ifbench pass@16 is still climbing at c=1.2 (65.87, the sweep maximum).
-So the trade at high c is "IF coverage up, reasoning output stability down",
-which subsequent sharpening could in principle recover.
+pass@16 几乎不动，而 mean@16 掉了 5.4 —— 能力完好，只是 pass@1 变得不那么可靠了。c=1.2 是**去锐化**，它没有摧毁数学方向。与此同时 ifbench 的 pass@16 在 c=1.2 时仍在攀升（65.87，整个扫描的最大值）。所以高 c 处的取舍是「IF 覆盖度上升、推理输出稳定性下降」，而这原则上可以由后续的锐化补回来。
 
-### An unreported checkpoint leads both metrics
+### 一个未报告的 checkpoint 在两个指标上都领先
 
-`merge5_percoef_if1.2` (IF direction at 1.2, others at 1.0) tops the table on
-**both** mean@16 (66.33) and pass@16 (80.67), and posts the highest gpqa pass@16
-anywhere (89.36). It does what the two tables above predict: take the IF
-coefficient gain without paying the reasoning de-sharpening. It was hand-tuned
-and is not proposed as a result, but it corroborates the mechanism.
+`merge5_percoef_if1.2`（IF 方向取 1.2，其余取 1.0）在 **mean@16（66.33）和 pass@16（80.67）两项**上都位居全表第一，并拿下了全项目最高的 gpqa pass@16（89.36）。它做到了上面两张表所预测的事：拿到 IF 系数的收益，却不付推理去锐化的代价。它是手工调出来的，不作为结果提出，但它佐证了该机制。
 
 ---
 
-## 3. Mixed-domain RL: the IF domain never trains
+## 3. 混合域 RL：IF 域从未被训练起来
 
-`train_mix_8x8_20260919_162504.log`, per-domain validation (`mean@4`):
+`train_mix_8x8_20260919_162504.log`，逐域验证（`mean@4`）：
 
 | step | aime25 | aime26 | gpqa | lcb_v5 | bfcl | **ifbench** | **ifeval** |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -104,126 +79,75 @@ and is not proposed as a result, but it corroborates the mechanism.
 | 100 | 50.00 | 53.33 | 60.48 | 61.62 | 69.50 | **31.67** | **84.20** |
 | 225 | 51.67 | 50.83 | 61.11 | 61.75 | 70.37 | **33.67** | **85.07** |
 
-Five of six domains improve normally (bfcl +7.4, gpqa +4.4). **ifbench moves 2.6
-points in 225 steps and ifeval 0.9** — both still at base level, while a dedicated
-`expert_if` run reaches ifbench 48.9 (+18).
+六个域中有五个正常提升（bfcl +7.4，gpqa +4.4）。**ifbench 在 225 步里只动了 2.6 个点，ifeval 只有 0.9** —— 两者都仍在 base 水平，而专门的 `expert_if` 运行能到 ifbench 48.9（+18）。
 
-This is not entropy collapse (`actor/entropy` holds 0.30–0.35 with no trend,
-`grad_norm` stable) and not a compute shortfall. It is **gradient starvation from
-degenerate GRPO groups.**
+这不是熵塌缩（`actor/entropy` 稳定在 0.30–0.35 且无趋势，`grad_norm` 稳定），也不是算力不足。这是**退化 GRPO group 造成的梯度饥饿。**
 
-Per-domain group statistics from the rollout dumps (`research/group_stats.py`,
-domain labelled from `gts.rm_type`), mix-RL steps 90–99:
+来自 rollout dump 的逐域 group 统计（`research/group_stats.py`，域由 `gts.rm_type` 标注），mix-RL 的 step 90–99：
 
-| domain | groups | mean score | zero-variance % | mean group std | **share of gradient-carrying groups** |
+| 域 | groups | mean score | 零方差占比 | mean group std | **携带梯度的 group 份额** |
 |---|---:|---:|---:|---:|---:|
 | Code | 327 | 0.353 | 59.0% | 0.105 | 25.6% |
 | Science | 290 | 0.557 | 52.4% | 0.179 | 26.3% |
 | Math | 283 | 0.593 | 38.2% | 0.241 | 33.4% |
 | **IF** | 244 | 0.404 | **68.4%** | **0.117** | **14.7%** |
 
-IF is 18.9% of the prompt mixture (Math 25.1 / Science 22.4 / Code 21.9 / IF 18.9
-/ Agent 11.7, counted from the Mix parquet) but contributes only **14.7%** of
-non-degenerate groups, and its groups have the lowest within-group spread — and
-under GRPO the advantage scales with that spread, so its effective share of the
-update is smaller still.
+IF 占 prompt 混合的 18.9%（按 Mix parquet 计数：Math 25.1 / Science 22.4 / Code 21.9 / IF 18.9 / Agent 11.7），却只贡献 **14.7%** 的非退化 group，而且它的 group 内离散度最低 —— 在 GRPO 下 advantage 正比于该离散度，所以它实际占到的更新份额还要更小。
 
-**The controlled comparison.** Training IF alone gives an *even higher*
-degeneracy rate — 70.9% — yet it learns fine, because it receives 100% of the
-gradient:
+**受控对比。** 单独训练 IF 时退化率**更高** —— 70.9% —— 但它学得很好，因为它拿到了 100% 的梯度：
 
-| run | IF reward trajectory |
+| 运行 | IF reward 轨迹 |
 |---|---|
-| expert_if (IF only) | 0.378 → 0.459 → 0.498 → **0.559** |
-| mix-RL (IF at 14.7%) | 0.365 → 0.370 → **0.404** |
+| expert_if（仅 IF） | 0.378 → 0.459 → 0.498 → **0.559** |
+| mix-RL（IF 占 14.7%） | 0.365 → 0.370 → **0.404** |
 
-So the mechanism is not "IF is a sparse-reward domain" in the abstract — the
-same sparsity is trainable when the domain owns the batch.
+所以该机制并非抽象意义上的「IF 是个稀疏 reward 域」—— 同样的稀疏性，在该域独占 batch 时是可训练的。
 
-**Correction — this is slowdown, not a threshold.** An earlier version of this
-section claimed IF "falls below the threshold where it makes progress at all."
-The slopes do not support that: IF reward rises at +0.00065/step in the mix
-against +0.00226/step for expert_if, i.e. **0.29×** — while the effective
-gradient share is 0.147, so the observed slowdown is ~1.95× *better* than a
-linear-in-share prediction. The defensible claim is that **IF is diluted to
-~0.29× learning rate, which inside a 250-step budget looks flat on benchmarks
-while still moving in training reward.** Whether a genuine threshold exists is
-open, and `../ideas/parallel_then_merge_vs_joint_rl.md` E2 is designed to answer it.
+**更正 —— 这是减速，不是阈值。** 本节早先的一个版本声称 IF「跌破了它能取得任何进展的阈值」。斜率不支持这一点：IF 的 reward 在混合中以 +0.00065/step 上升，而 expert_if 是 +0.00226/step，即 **0.29×** —— 而有效梯度份额是 0.147，所以观测到的减速比「按份额线性预测」要好约 1.95×。可辩护的主张是：**IF 被稀释到约 0.29× 的学习速率，这在 250 步的预算内于 benchmark 上看起来是平的，但训练 reward 仍在移动。** 是否真的存在阈值是开放问题，`../ideas/parallel_then_merge_vs_joint_rl.md` 的 E2 正是为回答它而设计的。
 
-**Also unresolved: dilution vs interference.** mix-RL and expert_if use the same
-`train_batch_size=128` / `rollout.n=16`, so IF gets ~1/5 the absolute effective
-groups per step in the mix. "Too few groups per step" (fixable by a larger
-batch) and "interference from sharing parameters" (not fixable that way) predict
-the same observation. Separating them is the blocking experiment (E1).
+**同样未解决：稀释 vs 干扰。** mix-RL 和 expert_if 使用相同的 `train_batch_size=128` / `rollout.n=16`，所以 IF 在混合中每步拿到的绝对有效 group 约为 1/5。「每步 group 太少」（可用更大的 batch 修复）与「共享参数带来的干扰」（那样修不了）预测的是同一个观测。分离二者是那个卡住的实验（E1）。
 
-**Data hygiene.** This run **diverged after step 300** — grad_norm 0.039 → 0.507,
-response length to 15093 tokens (92% truncated), entropy to 0.009, and
-aime25/aime26/gpqa/ifbench all to zero. `global_step_275` is the last healthy
-checkpoint (aime25 46.67, ifbench 32.75). The IF finding is independent of the
-divergence (visible from step 0), but any rerun needs gradient-norm clipping.
+**数据卫生。** 这次运行**在 step 300 之后发散了** —— grad_norm 0.039 → 0.507，回答长度到 15093 token（92% 被截断），熵到 0.009，aime25/aime26/gpqa/ifbench 全部归零。`global_step_275` 是最后一个健康的 checkpoint（aime25 46.67，ifbench 32.75）。IF 的发现独立于该发散（从 step 0 就可见），但任何重跑都需要加上梯度范数裁剪。
 
-### Per-domain dynamics revise this into a two-factor account
+### 逐域动态把它修订成了一个双因子的解释
 
-Tracking group *composition* over training (`research/variance_trajectory.py`,
-90-step windows, steps 1–270) shows IF is not the only sick domain, nor the
-worst. Rates per step, against expert_if's dWrong/dt = −0.159:
+追踪训练过程中 group 的*构成*变化（`research/variance_trajectory.py`，90 步窗口，step 1–270）显示：IF 不是唯一生病的域，也不是最糟的。速率按每步计，对照 expert_if 的 dWrong/dt = −0.159：
 
-| domain | prompt share | eff groups/step | dWrong/dt | vs expert | group std | verdict |
+| 域 | prompt share | eff groups/step | dWrong/dt | vs expert | group std | 判定 |
 |---|---:|---:|---:|---:|---|---|
-| Science | 19.5% | 15.8 | −0.0067 | 0.04× | 0.216 → **0.182** | healthy |
-| Agent | 14.8% | — | — | — | 0.500 → **0.426** | healthy (score +0.280) |
-| Math | 23.4% | 19.5 | +0.0078 | −0.05× | 0.243 → 0.233 | **saturated** |
-| IF | 18.0% | 7.7 | −0.0267 | 0.17× | 0.120 → 0.124 | **starved** |
-| **Code** | **24.2%** | 10.4 | **−0.0011** | **0.01×** | 0.085 → 0.083 | **frozen** |
+| Science | 19.5% | 15.8 | −0.0067 | 0.04× | 0.216 → **0.182** | 健康 |
+| Agent | 14.8% | — | — | — | 0.500 → **0.426** | 健康（score +0.280） |
+| Math | 23.4% | 19.5 | +0.0078 | −0.05× | 0.243 → 0.233 | **饱和** |
+| IF | 18.0% | 7.7 | −0.0267 | 0.17× | 0.120 → 0.124 | **饥饿** |
+| **Code** | **24.2%** | 10.4 | **−0.0011** | **0.01×** | 0.085 → 0.083 | **冻结** |
 
-Three corrections to the account above:
+对上述解释的三处更正：
 
-1. **Healthy learning is variance *decay*, not growth.** expert_if's group std
-   falls 0.120 → 0.066 while zero-variance groups *rise* to 81%, because
-   all-wrong groups convert to all-right (wrong 42.7% → 18.0%, right 25.3% →
-   62.9%). The earlier "self-locking" narrative had the sign backwards.
-2. **Code is worse than IF and is not starved.** Its all-wrong share is immobile
-   (57.6% → 57.4%) despite the *largest* prompt share and more effective groups
-   per step than IF. Gradient supply is adequate and it still does not learn:
-   the task exceeds current capability. **More batch cannot fix this**, which
-   refutes the single-factor "effective gradient share governs learning" claim.
-3. **Two domains are healthy**, so joint RL is not broadly harmful — the failures
-   are domain-specific. Agent, whose continuous reward yields 0.0% degenerate
-   groups and std 2–4× the others, learns fastest, supporting within-group
-   spread as the driver.
+1. **健康的学习是方差*衰减*，不是增长。** expert_if 的 group std 从 0.120 降到 0.066，而零方差 group *上升*到 81%，因为全错 group 正在转化为全对（wrong 42.7% → 18.0%，right 25.3% → 62.9%）。早先那个「自锁」的叙述把符号搞反了。
+2. **Code 比 IF 更糟，而且它不是饥饿。** 它的全错占比纹丝不动（57.6% → 57.4%），尽管它握有*最大*的 prompt 份额、每步有效 group 也比 IF 多。梯度供给充足而它仍然学不动：任务超出了当前能力。**加大 batch 修不了这个**，这反驳了「有效梯度份额主导学习」的单因子主张。
+3. **有两个域是健康的**，所以联合 RL 并非普遍有害 —— 失败是域特定的。Agent 的连续 reward 使退化 group 占比为 0.0%、std 是其他域的 2–4 倍，它学得最快，这支持了「group 内离散度是驱动因素」。
 
-**So the claim becomes a 2×2**, with all informative cells populated by one run:
+**于是该主张变成一个 2×2**，且所有有信息的格子都由一次运行填满：
 
-| | gradient adequate | gradient starved |
+| | 梯度充足 | 梯度饥饿 |
 |---|---|---|
-| task within capability | healthy (Science, Agent) | **starvation** (IF) — fixable by batch/mixture |
-| task beyond capability | **difficulty freeze** (Code) — batch useless | both |
+| 任务在能力范围内 | 健康（Science、Agent） | **饥饿**（IF）—— 可由 batch/混合比例修复 |
+| 任务超出能力范围 | **难度冻结**（Code）—— batch 无用 | 两者皆有 |
 
-**Metric caveat:** `grp_std` is low both before a domain starts (IF, Code: high
-all-wrong) and after it finishes (expert_if late: high all-right). Weighting
-effective gradient share by mean std — as the analysis above does — is therefore
-biased. Report **dWrong/dt** and **dRight/dt** instead.
+**指标警示：** `grp_std` 在一个域起步之前（IF、Code：all-wrong 高）和完成之后（expert_if 后期：all-right 高）都会偏低。因此像上面分析那样用 mean std 来加权有效梯度份额是有偏的。请改为报告 **dWrong/dt** 与 **dRight/dt**。
 
-**Fixes, now differentiated.** IF: balance by gradient-carrying group count
-(~2.5× upsampling). Code: difficulty filtering or a curriculum — batching is
-wasted on it, and at 24% of prompts it may be crowding out domains that could
-learn. Extrapolation helps neither: scaling a task vector that never learned a
-domain yields nothing.
+**修法，现在区分开了。** IF：按携带梯度的 group 数配平（约 2.5× 上采样）。Code：难度过滤或课程学习 —— 加大 batch 在它身上是浪费，而且它占 24% 的 prompt，可能正在挤掉那些本来学得会的域。外推对两者都无帮助：放大一个从未学会某个域的 task vector 不会凭空变出东西。
 
-Interim E1 evidence (`train_mix_8x8_20260921_164602`, bs=512, lr=2e-6, 78 steps):
-IF effective groups rose to 30.6/step (**0.82×** expert parity) but recovery is
-only **0.51×** by reward slope and **0.66×** by dWrong/dt — dilution is dominant
-with roughly a third unexplained, and IF's zero-variance rate is unchanged at
-~70%.
+E1 的阶段性证据（`train_mix_8x8_20260921_164602`，bs=512，lr=2e-6，78 步）：
+IF 的有效 group 升到 30.6/步（专家等价水平的 **0.82×**），但按 reward 斜率只恢复到 **0.51×**、按 dWrong/dt 只恢复到 **0.66×** —— 稀释是主导因素，约有三分之一无法解释，且 IF 的零方差率维持在 ~70% 不变。
 
 ---
 
-## 4. Weight-space geometry
+## 4. 权重空间几何
 
-All endpoints fp32 (see §5 for why that qualifier matters). 398 shared float
-tensors, ‖θ_base‖ = 1583.4033.
+所有端点均为 fp32（至于为什么这个限定词重要，见第 5 节）。398 个共享浮点张量，‖θ_base‖ = 1583.4033。
 
-| model | ‖τ‖ | ‖τ‖/‖θ_base‖ |
+| 模型 | ‖τ‖ | ‖τ‖/‖θ_base‖ |
 |---|---:|---:|
 | expert_math | 0.9881 | 0.0624% |
 | expert_code | 0.8501 | 0.0537% |
@@ -233,85 +157,51 @@ tensors, ‖θ_base‖ = 1583.4033.
 | merge5_c1.0 | 2.3058 | 0.1456% |
 | MOPD_merge1.0 | 1.6356 | 0.1033% |
 
-**The five experts are mutually orthogonal.** Pairwise cosines lie in
-[−0.0006, 0.0222]; the largest is math–science, the rest are at the 1e-3 level.
+**五个专家相互正交。** 两两余弦位于 [−0.0006, 0.0222]；最大的是 math–science，其余都在 1e-3 量级。
 
-**Task arithmetic is exactly a sum.** Predicting ‖Στᵢ‖ from the norms and the full
-cosine matrix gives **2.3057** against a measured **2.3058**. (An earlier
-statement of this check in-session was wrong on two counts — it omitted cross
-terms and compared against a bf16 merge; corrected here.) Each expert's cosine to
-the merge equals ‖τᵢ‖/‖τ_merge‖, exactly as an orthogonal sum requires — for
-expert_if, the most orthogonal of the five, 0.5732 measured against 0.5734
-predicted.
+**Task arithmetic 恰好就是求和。** 用各范数与完整余弦矩阵预测 ‖Στᵢ‖ 得 **2.3057**，实测 **2.3058**。（本项检查在本次 session 中早先的一个说法错在两处 —— 它漏掉了交叉项，并且是拿 bf16 的合并结果做对比；此处已更正。）每个专家与合并结果的余弦等于 ‖τᵢ‖/‖τ_merge‖，正如正交求和所要求的 —— 对五个中最正交的 expert_if，实测 0.5732，预测 0.5734。
 
-**Student–teacher alignment is strong, not near-orthogonal.**
+**学生–教师的对齐是强的，不是近乎正交的。**
 
-| pair | cosine |
+| 配对 | 余弦 |
 |---|---:|
-| MOPD_merge1.0 ↔ merge5 (its own teacher) | **0.4580** |
-| MOPD_vanilla ↔ merge5 (not its teacher) | 0.2299 (bf16 measurement) |
-| two random vectors at this dimension | ~1.6e-5 |
-| expert ↔ expert | ≤ 0.0222 |
+| MOPD_merge1.0 ↔ merge5（它自己的教师） | **0.4580** |
+| MOPD_vanilla ↔ merge5（不是它的教师） | 0.2299（bf16 测量） |
+| 该维度下两个随机向量 | ~1.6e-5 |
+| 专家 ↔ 专家 | ≤ 0.0222 |
 
-Against a 1.6e-5 random baseline, 0.458 is alignment of a completely different
-order than the genuinely-orthogonal expert pairs. The teacher is identifiable
-from weights alone: the student trained on merge5 aligns to it substantially
-better than the student that never saw it.
+相对 1.6e-5 的随机基线，0.458 是与真正正交的专家配对**完全不同量级**的对齐。教师可以仅从权重中被识别出来：在 merge5 上训练出来的学生，与它的对齐显著优于那个从未见过它的学生。
 
-Interpretation: distillation constrains only the output distribution, and the
-weight space has vast functionally-equivalent sets (permutation and scaling
-symmetries), so a student descending from θ_base settles at whichever equivalent
-point is nearest — not the teacher's. That 0.458 survives anyway says the
-objective pins down weight geometry more than one would expect. And the student
-reaches comparable quality with a **29% shorter** task vector (1.6356 vs 2.3058),
-i.e. a shorter route to the same function.
+解读：蒸馏只约束输出分布，而权重空间存在大量功能等价的集合（排列对称性与缩放对称性），所以一个从 θ_base 下降的学生会停在离它最近的那个等价点上 —— 而不是教师所在的点。而 0.458 依然存活下来，说明该目标对权重几何的钉定程度超出人们的预期。并且学生以**短 29%** 的 task vector（1.6356 对 2.3058）达到了可比的质量，即通往同一功能的一条更短路径。
 
 ---
 
-## 5. Numerical precision: task vectors live below bfloat16 resolution
+## 5. 数值精度：task vector 活在 bfloat16 分辨率之下
 
-‖τ‖/‖θ_base‖ ≈ 0.1%, so a large share of τ's entries fall below one bfloat16
-rounding unit. In a representative tensor (`layers.10.mlp.down_proj`), **70.7% of
-τ's entries were exactly zero** in a bf16 export and 0% in fp32. Three distinct
-defects followed from this; all were caught by a geometry check run *before*
-spending GPU time, which is the main process lesson here.
+‖τ‖/‖θ_base‖ ≈ 0.1%，因此 τ 中有很大一部分元素低于一个 bfloat16 舍入单位。在一个代表性张量（`layers.10.mlp.down_proj`）中，**τ 的 70.7% 元素在 bf16 导出里恰好为零**，而在 fp32 中是 0%。由此产生了三个独立的缺陷；它们全都是被一道**在花 GPU 时间之前**运行的几何检查抓到的 —— 这才是这里主要的过程教训。
 
-**(a) The export pipeline discarded precision at the source.**
-`verl/model_merger/fsdp_model_merger.py` cast fp32 FSDP master weights with
-`.bfloat16()` while reassembling shards. Re-exporting in fp32:
+**(a) 导出流水线在源头就丢掉了精度。**
+`verl/model_merger/fsdp_model_merger.py` 在重组分片时把 fp32 的 FSDP master weights 用 `.bfloat16()` 做了转换。改为 fp32 重新导出：
 
-| | ‖τ_MOPD‖ | cos to fp32 τ |
+| | ‖τ_MOPD‖ | 与 fp32 τ 的余弦 |
 |---|---:|---:|
-| bf16 export (what was evaluated) | 1.4259 | 0.6791 |
-| fp32 export | 1.6356 | 1.0 |
+| bf16 导出（被评测的那个） | 1.4259 | 0.6791 |
+| fp32 导出 | 1.6356 | 1.0 |
 
-The deployed MOPD checkpoint's task vector is only **0.68-aligned** with the
-vector actually trained, retaining 87% of its norm.
+已部署的 MOPD checkpoint 的 task vector 与真正训练出来的那个向量只有 **0.68 的对齐**，保留了其范数的 87%。
 
-**(b) `from_config` silently re-rounds.** `AutoModelForCausalLM.from_config`
-honours `config.torch_dtype` — bfloat16 for the base model — so `load_state_dict`
-rounded fp32 state into bf16 parameters and a later `.to(float32)` merely widened
-already-rounded values. Result: a 15 GB "fp32" checkpoint holding bf16 data.
-Detect with `(t.to(torch.bfloat16).to(t.dtype) == t).all()`. **This affects any
-export path that builds an empty model from a base config and then loads
-weights**, regardless of a trailing `.to(fp32)`.
+**(b) `from_config` 会静默地重新舍入。** `AutoModelForCausalLM.from_config`
+会遵循 `config.torch_dtype` —— 基座模型是 bfloat16 —— 于是 `load_state_dict` 把 fp32 state 舍入进了 bf16 参数，而后来的 `.to(float32)` 只是把已经舍入过的值加宽。结果：一个 15 GB 的「fp32」checkpoint，里面装的是 bf16 数据。用 `(t.to(torch.bfloat16).to(t.dtype) == t).all()` 检测。**这会影响任何「从一个 base config 建空模型再加载权重」的导出路径**，无论后面有没有 `.to(fp32)`。
 
-**(c) Double rounding.** Computing θ_base + α·τ from an already-bf16 export and
-storing bf16 collapses α = 1.15 to an effective 1.02.
+**(c) 双重舍入。** 从一个已经是 bf16 的导出计算 θ_base + α·τ 并以 bf16 存储，会把 α = 1.15 塌缩成实际生效的 1.02。
 
-### What is and is not affected
+### 什么受影响，什么不受影响
 
-**Evaluation scores are unaffected.** vLLM casts to bf16 regardless of storage
-(`rollout.dtype: bfloat16`), and "round at export" and "round at load" are the
-same operation on the same values. Re-evaluating an fp32 re-export reproduces the
-bf16 score exactly — so **no published number needs re-running on precision
-grounds**. fp32 matters for downstream *arithmetic* and *analysis*, not fidelity
-of a single eval.
+**评测分数不受影响。** vLLM 无论怎么存都会转成 bf16（`rollout.dtype: bfloat16`），而且「导出时舍入」与「加载时舍入」是对同样的值做同样的操作。重新评测一个 fp32 重导出会精确复现 bf16 的分数 —— 所以**没有任何已发布的数字需要以精度为由重跑**。fp32 对下游的*运算*和*分析*有意义，对单次评测的保真度没有意义。
 
-**Coefficient sweeps are affected.** What inference sees is the share of ‖τ‖
-surviving the cast, measured over the full model:
+**系数扫描是受影响的。** 推理实际看到的是转换后存活下来的 ‖τ‖ 份额，在全模型上测量：
 
-| nominal c | merge5 effective | surviving | MOPD effective | surviving |
+| 名义 c | merge5 生效值 | 存活率 | MOPD 生效值 | 存活率 |
 |---|---:|---:|---:|---:|
 | 0.4 | 0.2858 | **71.5%** | 0.2417 | **60.4%** |
 | 0.6 | 0.4979 | 83.0% | 0.4347 | 72.5% |
@@ -319,55 +209,35 @@ surviving the cast, measured over the full model:
 | 1.0 | 0.9663 | 96.6% | 0.8718 | 87.2% |
 | 1.2 | 1.1966 | 99.7% | 1.1075 | 92.3% |
 
-Cross-check: 0.966 × 2.3058 = 2.228, matching the measured bf16 merge norm
-2.2281; 0.872 × 1.6356 = 1.426 against 1.4259 measured.
+交叉校验：0.966 × 2.3058 = 2.228，与实测的 bf16 合并范数 2.2281 吻合；0.872 × 1.6356 = 1.426，而实测是 1.4259。
 
-This licensed two predictions, **both of which were then tested and refuted**:
+这引出了两个预测，**而这两个随后都被检验并推翻了**：
 
-1. ~~The published c-axis is non-linear, so the rising limb is steeper than the
-   true relationship.~~
-2. ~~bf16 inference penalizes distillation more than merging, biasing the
-   66.00 vs 65.45 comparison.~~
+1. ~~已发布的 c 轴是非线性的，所以上升段的斜率比真实关系更陡。~~
+2. ~~bf16 推理对蒸馏的惩罚大于对合并的惩罚，使 66.00 vs 65.45 的对比有偏。~~
 
-### The precision control refutes both (measured, n=16)
+### 精度对照推翻了两者（已测量，n=16）
 
-Same fp32 weights, three diagnostic columns, changing only `ROLLOUT_DTYPE`:
+同样的 fp32 权重，三列诊断基准，只改 `ROLLOUT_DTYPE`：
 
-| model | bf16 τ survival | bf16 | fp32 | fp32 − bf16 |
+| 模型 | bf16 下 τ 存活率 | bf16 | fp32 | fp32 − bf16 |
 |---|---:|---:|---:|---:|
 | merge5_c0.4 | **71.5%** | 49.16 | 48.31 | **−0.85** |
 | merge5_c1.0 | 96.6% | 57.95 | 57.54 | −0.41 |
 | MOPD_merge1.0 | 87.2% | 56.65 | 56.58 | −0.07 |
 
-No model improves. `merge5_c0.4` is decisive: it loses 28.5% of ‖τ‖ to rounding
-and gains **nothing** from fp32 inference (its one notable column, aime25 −3.75,
-is 30 problems and within noise). MOPD's change (−0.07) is *smaller* than
-merge5_c1.0's (−0.41), so there is no distillation-specific handicap either.
+没有一个模型变好。`merge5_c0.4` 是决定性的：它因舍入丢掉了 28.5% 的 ‖τ‖，而 fp32 推理给它带来的是**零**收益（它唯一值得一提的一列 aime25 −3.75，只有 30 道题，处于噪声之内）。MOPD 的变化（−0.07）比 merge5_c1.0 的（−0.41）还**小**，所以也不存在蒸馏特有的不利因素。
 
-**Consequences, corrected:**
+**更正后的结论：**
 
-- **The reported c-sweep needs no correction.** `merge5_c0.4`'s 60.63 is the
-  genuine performance of that coefficient; the curve shape is real.
-- **The 66.00 vs 65.45 comparison is fair.** No re-running is required on
-  precision grounds — every published score stands.
-- **L2 norm is a poor proxy for the functional strength of a task vector.**
-  Rounding truncates the smallest-magnitude coordinates; they carry 28.5% of the
-  L2 norm while contributing almost nothing to the function. This is a stronger
-  form of the DARE observation (drop most of the delta, keep the behaviour) —
-  here no rescaling is needed at all. **Anything that normalizes by ‖τ‖ — the
-  norm-matched coefficients in `../experiments/20260916_norm_matched_subsets`
-  included — is therefore equalizing a quantity that is only loosely related to
-  functional magnitude.** Worth stating as a caveat wherever norm matching is
-  used as a control.
-- The fp32 export fix remains worth keeping for **task-vector arithmetic and
-  geometry** (§4's cosines shift materially: 0.679 → 1.0 against the true τ, and
-  student–teacher 0.323 → 0.458), but it is not an urgent correctness bug for
-  evaluation.
+- **已报告的 c 扫描不需要任何修正。** `merge5_c0.4` 的 60.63 就是该系数的真实表现；曲线形状是真实的。
+- **66.00 vs 65.45 的对比是公平的。** 不需要以精度为由重跑任何东西 —— 每一个已发布的分数都站得住。
+- **L2 范数是 task vector 功能强度的不良代理量。** 舍入截断的是幅值最小的那些坐标；它们承载了 28.5% 的 L2 范数，却对函数几乎没有贡献。这是 DARE 观察的一个更强形式（丢掉大部分 delta，保留行为）—— 而这里连重新缩放都不需要。**凡是按 ‖τ‖ 做归一化的地方 —— 包括 `../experiments/20260916_norm_matched_subsets` 里的那些范数匹配系数 —— 都是在均衡一个与功能强度只有松散关系的量。** 在任何把范数匹配用作对照的地方，都值得把这一点作为警示写明。
+- fp32 导出的修复对 **task vector 运算与几何**仍然值得保留（第 4 节的余弦有实质性变化：相对真实 τ 从 0.679 到 1.0，学生–教师从 0.323 到 0.458），但对评测而言它不是一个紧急的正确性 bug。
 
-### Extrapolation does not repair this
+### 外推修复不了这一点
 
-Scaling τ up does push more entries above the rounding threshold, but far too
-slowly to serve as a fix:
+把 τ 放大确实能把更多元素推到舍入阈值之上，但慢到远不足以当作修复手段：
 
 | α | ‖r‖/‖τ‖ | cos(r, τ) | ‖r/α − τ‖/‖τ‖ |
 |---|---:|---:|---:|
@@ -377,258 +247,168 @@ slowly to serve as a fix:
 | 2.0 | 2.034 | 0.842 | 0.568 |
 | 3.0 | 3.131 | **0.909** | 0.438 |
 
-At α = 1.15 fidelity improves by only +0.036 cosine while the update is amplified
-1.20×. Reaching cos > 0.9 needs α ≈ 3, where normalized error is still 43.8%.
-Amplification is first-order and fidelity recovery second-order — they cannot be
-separated. **fp32 inference is the clean control**, and it is cheap.
+在 α = 1.15 时，保真度只提升了 +0.036 余弦，而更新被放大了 1.20×。要达到 cos > 0.9 需要 α ≈ 3，而那时归一化误差仍有 43.8%。放大是一阶的，保真度恢复是二阶的 —— 两者无法分离。**fp32 推理才是干净的对照**，而且它很便宜。
 
 ---
 
-## 6. Why merging works: orthogonality buys linear-regime headroom
+## 6. 为什么合并有效：正交性换来了线性区间的余量
 
-A natural reading of §4 is "the updates are small, so the experts stay
-orthogonal, so they add." The data splits that into one false half and one true
-half.
+对第 4 节的一个自然读法是「更新很小，所以专家保持正交，所以它们可加」。数据把它拆成了一半错、一半对。
 
-**False: small displacement does not cause orthogonality.** If it did, the
-largest task vector would be the least orthogonal. The opposite holds:
+**错的一半：小的位移并不导致正交性。** 如果它导致，那么最大的 task vector 应当是最不正交的。事实正好相反：
 
-| expert | ‖τ‖ | max cosine to another expert |
+| 专家 | ‖τ‖ | 与另一专家的最大余弦 |
 |---|---:|---:|
-| expert_if | **1.3220** (largest) | **0.0003** (most orthogonal) |
+| expert_if | **1.3220**（最大） | **0.0003**（最正交） |
 | expert_science | 1.0232 | 0.0222 |
 | expert_math | 0.9881 | 0.0222 |
 | expert_agent | 0.8694 | 0.0012 |
 | expert_code | 0.8501 | 0.0088 |
 
-The ordering tracks task semantics, not magnitude: the largest cosine is
-math–science, then math–code, then code–science, with agent and IF far below. In
-4e9 dimensions orthogonality is nearly free anyway (random cosine ≈ 1.6e-5), so
-no smallness assumption is needed to obtain it.
+该排序跟随的是任务语义，而非幅值：最大的余弦是 math–science，然后是 math–code，然后是 code–science，agent 和 IF 远在其下。在 4e9 维里，正交性本来就几乎是免费的（随机余弦 ≈ 1.6e-5），所以根本不需要「小」这个假设就能得到它。
 
-**True: small displacement is what makes the sum additive.** Within a
-small-enough neighbourhood the model responds approximately linearly, so
-f(θ + τ₁ + τ₂) ≈ f(θ) + J·τ₁ + J·τ₂. The sweep locates that boundary:
+**对的一半：小的位移才是使求和呈加性的东西。** 在足够小的邻域内，模型的响应近似线性，因此
+f(θ + τ₁ + τ₂) ≈ f(θ) + J·τ₁ + J·τ₂。该扫描定位到了那条边界：
 
 | c | ‖τ_merge‖/‖θ_base‖ | AVG8 |
 |---|---:|---:|
-| 1.0 | **0.146%** | 66.00 (peak) |
+| 1.0 | **0.146%** | 66.00（峰值） |
 | 1.2 | **0.175%** | 65.08 |
 
-**How the halves connect.** Orthogonality matters not because it avoids
-"conflict" but because it keeps the *summed* displacement inside that regime:
+**两半如何连接起来。** 正交性之所以重要，不是因为它避免了「冲突」，而是因为它把*求和后的*位移保持在了那个区间之内：
 
-- five perfectly aligned vectors: ‖Στᵢ‖ = Σ‖τᵢ‖ = 5.0528 → **0.319%**
-- actually orthogonal: ‖Στᵢ‖ = **2.3058** → **0.146%**
+- 五个完全对齐的向量：‖Στᵢ‖ = Σ‖τᵢ‖ = 5.0528 → **0.319%**
+- 实际正交：‖Στᵢ‖ = **2.3058** → **0.146%**
 
-0.319% sits well past the observed 0.175% degradation point. Orthogonality
-shrinks the total displacement 2.19× and thereby lands a five-expert sum exactly
-inside the additive region.
+0.319% 远远越过实测的 0.175% 退化点。正交性把总位移缩小了 2.19×，从而使五专家的求和恰好落在加性区域之内。
 
-**Direct evidence — `../experiments/20260916_norm_matched_subsets`.** That
-experiment fixes total update norm to the five-expert λ=1.0 value and varies only
-how many directions share it:
+**直接证据 —— `../experiments/20260916_norm_matched_subsets`。** 该实验把总更新范数固定为五专家 λ=1.0 的值，只改变有多少个方向来分享它：
 
-| variant | uniform coefficient | reasoning avg |
+| 变体 | 统一系数 | 推理平均 |
 |---|---:|---:|
 | five_all | 1.0 | **62.67** |
 | mcs + agent | 1.2204 | 62.28 |
 | mcs + if | 1.0800 | 61.71 |
 | mcs | 1.3755 | 60.55 |
 
-At equal displacement, more directions is monotonically better (5 > 4 > 3,
-spanning 2.1 points); packing the same norm into three directions is worst. So
-the operative variable is **how many independent directions fit inside the linear
-budget**, not smallness per se.
+在相同位移下，方向越多单调越好（5 > 4 > 3，跨 2.1 个点）；把同样的范数塞进三个方向是最差的。所以起作用的变量是**有多少个独立方向能装进线性预算**，而不是「小」本身。
 
-**Counterexample against "smaller is better".** MOPD's ‖τ‖ is 29% below merge5's
-(1.6356 vs 2.3058) at comparable quality (65.45 vs 66.00). Neither "small wins"
-nor "large wins" survives.
+**针对「越小越好」的反例。** MOPD 的 ‖τ‖ 比 merge5 低 29%（1.6356 对 2.3058），而质量相当（65.45 对 66.00）。「小的赢」和「大的赢」都不成立。
 
-### The projection experiment confirms it (measured, n=16, full suite)
+### 投影实验确认了这一点（已测量，n=16，完整套件）
 
-Splitting τ_merge against τ_MOPD (c = 0.6449) and evaluating each part:
+把 τ_merge 相对 τ_MOPD 分解（c = 0.6449）并评估每一部分：
 
-| model | ‖τ‖ | mean@16 | pass@16 |
+| 模型 | ‖τ‖ | mean@16 | pass@16 |
 |---|---:|---:|---:|
-| **merge5_c1.0** (full τ_merge) | 2.3058 | **66.00** | **80.28** |
-| `proj_parallel` (MOPD direction only) | 1.0560 | 63.68 | 78.56 |
-| `proj_parallel_normmatched` (same direction, scaled to ‖τ_merge‖) | 2.3058 | 60.04 | 75.48 |
-| `proj_perp_normmatched` (orthogonal remainder, scaled to ‖τ_merge‖) | 2.3058 | 60.23 | 76.91 |
+| **merge5_c1.0**（完整 τ_merge） | 2.3058 | **66.00** | **80.28** |
+| `proj_parallel`（仅 MOPD 方向） | 1.0560 | 63.68 | 78.56 |
+| `proj_parallel_normmatched`（同方向，缩放到 ‖τ_merge‖） | 2.3058 | 60.04 | 75.48 |
+| `proj_perp_normmatched`（正交余项，缩放到 ‖τ_merge‖） | 2.3058 | 60.23 | 76.91 |
 
-**H2 is falsified — τ_merge is not mostly redundant.** `proj_parallel` reaching
-96.5% of the merge's score on 46% of the norm looks superficially supportive, but
-the norm-matched control settles it: scaling that same direction up to ‖τ_merge‖
-makes it **worse**, 63.68 → 60.04. The MOPD direction is not a functional
-subspace of τ_merge; it works only near its original scale. (This also explains
-a runtime anomaly — `parallel_normmatched` generated pathologically long outputs
-on long-CoT benchmarks, up to 2076 s/batch against ~200 s normally, with aime25
-pass@16 falling to 63.61, below the base model's 71.46. Amplifying a single
-direction damages convergence.)
+**H2 被证伪 —— τ_merge 并非大部分冗余。** `proj_parallel` 用 46% 的范数达到合并模型 96.5% 的分数，表面上看是支持的，但范数匹配对照解决了这个问题：把同一个方向放大到 ‖τ_merge‖ 会让它**更差**，63.68 → 60.04。MOPD 方向并不是 τ_merge 的一个功能子空间；它只在接近其原始尺度时才有效。（这也解释了一个运行时的异常 —— `parallel_normmatched` 在长 CoT 基准上生成了病态长的输出，高达 2076 s/batch，而正常约 200 s，且 aime25 的 pass@16 掉到 63.61，低于基座模型的 71.46。放大单一方向会损害收敛。）
 
-**And the two halves are equally good, which is the real result.** At equal norm,
-`perp_nm` 60.23 ≈ `parallel_nm` 60.04, and both sit ~6 points below the full
-merge. There is no "essential direction plus redundant remainder": remove either
-half, restore the norm, and you lose the same amount. The halves are
-complementary by axis — `perp_nm` posts the table's best gpqa pass@16 (87.29,
-above merge5's own 87.07) while `parallel_nm` leads on ifbench (52.71 / 61.26 vs
-37.08 / 50.64) — consistent with distillation having absorbed some IF ability but
-not enough to substitute for τ_if.
+**而两半同样好，这才是真正的结果。** 在等范数下，`perp_nm` 60.23 ≈ `parallel_nm` 60.04，两者都比完整合并低约 6 个点。不存在「一个本质方向加一堆冗余余项」：去掉任意一半、恢复范数，你损失的是同样的量。两半在各条轴上是互补的 —— `perp_nm` 拿下了全表最好的 gpqa pass@16（87.29，高于 merge5 自己的 87.07），而 `parallel_nm` 在 ifbench 上领先（52.71 / 61.26 对 37.08 / 50.64）—— 这与「蒸馏吸收了一部分 IF 能力，但还不足以替代 τ_if」是一致的。
 
-So performance comes from **many independent directions summing**, not from one
-dominant direction. Together with the norm-matched subset result (5 > 4 > 3
-directions at fixed norm), that is two independent lines of evidence.
+所以性能来自**众多独立方向的求和**，而不是某一个主导方向。连同范数匹配子集的结果（固定范数下 5 > 4 > 3 个方向），这是两条独立的证据线。
 
-**Suggested follow-up.** Measure the linearity directly: compare
-f(θ + c·τ_math + c·τ_code) against the sum of the individual effects while
-sweeping c. If the departure from additivity turns up near 0.15%, the linear
-regime becomes a measurement rather than an inference.
+**建议的后续。** 直接测量线性性：在扫描 c 的同时，比较
+f(θ + c·τ_math + c·τ_code) 与各个单独效应之和。如果偏离加性在 0.15% 附近出现，那么线性区间就成了一个**测量量**，而不再是一个推断。
 
 ---
 
-## Code changes
+## 代码改动
 
-| file | change |
+| 文件 | 改动 |
 |---|---|
-| `verl/model_merger/fsdp_model_merger.py` | `.bfloat16()` → `.to(save_dtype)`; `_validate_state_dict` follows config (its hardcoded bf16 dtype assertion would otherwise fail) |
-| `verl/model_merger/base_model_merger.py` | new `save_dtype` field (**default float32**) + `torch_save_dtype`; save path honours it; writes `config.torch_dtype` (previously `None` on merge outputs) |
-| `verl/model_merger/__main__.py` (CLI) | new `--save_dtype {float32,bfloat16,float16}` |
-| `examples/llm_fusion/merge/run_merge*.sh` (3 files) | `SAVE_DTYPE` default → `float32`; corrected the comment claiming bf16 is "lossless for vLLM eval" (true for evaluating that checkpoint, false once it feeds further arithmetic) |
-| `examples/llm_fusion/merge/convert_experts_to_hf.py` | its 120-line `FP32FSDPModelMerger` existed only to work around the bug above; reduced to a thin wrapper now that upstream is fixed |
-| `examples/llm_fusion/eval/eval.sh` | new `ROLLOUT_DTYPE` (default `bfloat16`, no behaviour change) for precision controls |
-| `research/experiments/{rescale_merged_update,project_task_vector}.py` | pin `config.torch_dtype` before `from_config` (defect (b)) |
+| `verl/model_merger/fsdp_model_merger.py` | `.bfloat16()` → `.to(save_dtype)`；`_validate_state_dict` 遵循 config（否则它硬编码的 bf16 dtype 断言会失败） |
+| `verl/model_merger/base_model_merger.py` | 新增 `save_dtype` 字段（**默认 float32**）与 `torch_save_dtype`；保存路径遵循它；写入 `config.torch_dtype`（此前在合并产物上是 `None`） |
+| `verl/model_merger/__main__.py`（CLI） | 新增 `--save_dtype {float32,bfloat16,float16}` |
+| `examples/llm_fusion/merge/run_merge*.sh`（3 个文件） | `SAVE_DTYPE` 默认改为 `float32`；更正了「bf16 对 vLLM 评测是无损的」这条注释（对评测**那个** checkpoint 为真，一旦它要喂给后续运算则为假） |
+| `examples/llm_fusion/merge/convert_experts_to_hf.py` | 它那个 120 行的 `FP32FSDPModelMerger` 原本只是为了绕开上面的 bug；上游修好后缩减为一个薄包装 |
+| `examples/llm_fusion/eval/eval.sh` | 新增 `ROLLOUT_DTYPE`（默认 `bfloat16`，行为不变），用于精度对照 |
+| `research/experiments/{rescale_merged_update,project_task_vector}.py` | 在 `from_config` 之前钉住 `config.torch_dtype`（缺陷 (b)） |
 
-New tooling: `research/parse_train_log.py` (verl console log → metric series),
-`research/group_stats.py` (rollout dumps → per-domain GRPO group statistics),
-`research/task_vector_geom.py` (norms and pairwise cosines — the gate that caught
-two modeling errors), `research/experiments/project_task_vector.py` (parallel /
-perpendicular decomposition with norm matching).
+新增工具：`research/parse_train_log.py`（verl console 日志 → 指标序列）、
+`research/group_stats.py`（rollout dump → 逐域 GRPO group 统计）、
+`research/task_vector_geom.py`（范数与两两余弦 —— 正是抓到两个建模错误的那道门禁）、
+`research/experiments/project_task_vector.py`（带范数匹配的平行 / 垂直分解）。
 
-Note `convert_experts_to_hf.py`'s docstring records that **the experts were always
-exported in fp32** — every merge in the paper used fp32 inputs. Only the MOPD side,
-which went through the unpatched `verl.model_merger`, was affected.
+注意 `convert_experts_to_hf.py` 的 docstring 记录了：**专家一直都是以 fp32 导出的** —— 论文中每一次合并用的都是 fp32 输入。只有 MOPD 那一侧走了未打补丁的 `verl.model_merger`，因此受到了影响。
 
 ---
 
-## Experiment status
+## 实验状态
 
-| experiment | status | outcome |
+| 实验 | 状态 | 结果 |
 |---|---|---|
-| H2 — projection / redundancy | **done** (n=16, full suite) | **falsified**; see §6 |
-| Precision control | **done** (n=16, 3 columns, bf16 vs fp32) | **both predictions refuted**; see §5 |
-| H1 — extrapolation | **done** (n=16, full suite) | **falsified on mean@16**, but see below |
+| H2 —— 投影 / 冗余 | **已完成**（n=16，完整套件） | **被证伪**；见第 6 节 |
+| 精度对照 | **已完成**（n=16，3 列，bf16 vs fp32） | **两个预测都被推翻**；见第 5 节 |
+| H1 —— 外推 | **已完成**（n=16，完整套件） | **在 mean@16 上被证伪**，但见下 |
 
-### H1 — extrapolation: falsified, with an unanticipated result
+### H1 —— 外推：被证伪，但有一个未预料到的结果
 
-θ_base + α·τ_MOPD, rebuilt from fp32 endpoints, geometry verified exactly
-(‖τ_1.15‖ = 1.8809 = 1.15 × 1.6356):
+θ_base + α·τ_MOPD，从 fp32 端点重建，几何经精确校验
+（‖τ_1.15‖ = 1.8809 = 1.15 × 1.6356）：
 
-| model | ‖τ‖ | mean@16 | pass@16 |
+| 模型 | ‖τ‖ | mean@16 | pass@16 |
 |---|---:|---:|---:|
 | MOPD α=1.0 | 1.6356 | **65.45** | 79.87 |
 | MOPD α=1.15 | 1.8809 | 65.23 | **80.42** |
 | MOPD α=1.30 | 2.1262 | 63.07 | 77.94 |
 
-mean@16 declines monotonically, so extrapolation does not add capability — as
-predicted. **But α=1.15 posts the second-highest pass@16 in the entire project
-(80.42), above its own teacher merge5_c1.0 (80.28)**, gaining ifbench +3.22,
-gpqa +1.70 and aime25 +1.00 in pass@16 while mean@16 barely moves (−0.22).
+mean@16 单调下降，所以外推并不增加能力 —— 正如预测的那样。**但 α=1.15 录得了整个项目第二高的 pass@16（80.42），高于它自己的教师 merge5_c1.0（80.28）**，在 pass@16 上拿到 ifbench +3.22、gpqa +1.70、aime25 +1.00，而 mean@16 几乎不动（−0.22）。
 
-This is the *same* sharpness-versus-coverage trade-off that the merge
-coefficient traces (§2): α buys coverage and pays in pass@1 reliability, and
-α=1.30 overshoots into losing both. Two mechanically unrelated knobs — weight
-merging coefficient and post-distillation extrapolation — produce the same curve
-shape, which is considerably stronger evidence for the sharpening account than
-either alone. Extrapolation is best described as **moving the operating point
-along the trade-off, not increasing total capability.**
+这与合并系数所描出的（第 2 节）是**同一条**锐化 vs 覆盖度权衡：α 买来覆盖度、以 pass@1 的可靠性支付代价，而 α=1.30 过冲到两者皆失。两个在机制上毫不相干的旋钮 —— 权重合并系数与蒸馏后外推 —— 产生了同样形状的曲线，这对锐化解释的支撑远强于其中任何一个单独的例子。外推最贴切的描述是**沿着权衡曲线移动工作点，而不是提高总能力。**
 
-### Superseded: the abandoned n=4 screen
+### 已废弃：那个被放弃的 n=4 筛选
 
-Kept only to document why the design changed. Three diagnostic columns, n=4, bf16:
+保留它只是为了记录设计为何改变。三列诊断基准，n=4，bf16：
 
-| model | aime25 | ifbench | lcb_v5 | mean |
+| 模型 | aime25 | ifbench | lcb_v5 | 均值 |
 |---|---:|---:|---:|---:|
 | merge5_c1.0 | 54.17 | 48.25 | 68.11 | 56.84 |
 | MOPD_merge1.0 | 55.83 | 47.25 | 67.93 | **57.00** |
 
-**These n=4 numbers are not usable for a decision, and the screen was abandoned
-because of them.** On the *same three columns* at n=16 the ordering is the
-opposite — merge5 58.34 vs MOPD 56.25, merge ahead by 2.10 — so n=4 reverses the
-sign. Per column: ifbench (+2.02 → +1.00) and lcb_v5 (+0.94 → +0.18) keep their
-sign and only shrink; aime25 swings from +3.33 to −1.66 and drags the mean with
-it. aime25 has 30 problems, so one problem is 3.33 points and a 5-point swing is
-1.5 problems — well inside sampling noise at 4 samples each.
+**这些 n=4 的数字不能用于决策，而该筛选正是因此被放弃的。** 在**同样三列**上以 n=16 跑，排序是相反的 —— merge5 58.34 对 MOPD 56.25，合并领先 2.10 —— 所以 n=4 把符号反转了。逐列看：ifbench（+2.02 → +1.00）和 lcb_v5（+0.94 → +0.18）保持符号只是缩小；aime25 从 +3.33 摆到 −1.66，并把均值一起拖走。aime25 只有 30 道题，所以一道题是 3.33 点，而 5 点的摆动只是 1.5 道题 —— 在每样本 4 条的采样噪声之内完全说得通。
 
-**Everything was relaunched at n=16 over the full eight benchmarks**, using the
-project's own `run_eval_experts.sh` — the script that produced every number in
-the reported table. Two reasons the n=4 screen was the wrong call: it cannot
-resolve gaps of this size, and it yields numbers that cannot be placed beside an
-n=16 table, so the work would have to be redone anyway.
+**所有东西都以 n=16 在完整八个基准上重新启动了**，用的是项目自己的 `run_eval_experts.sh` —— 也就是产出已报告表格中每一个数字的那个脚本。n=4 筛选是错误选择，有两个理由：它分辨不出这个量级的差距，而且它产出的数字无法与 n=16 的表格并列，于是这份工作无论如何都得重做。
 
-Because fp32 storage does not change eval scores (§5), three models already have
-n=16 results and are not re-run: merge5_c0.4 (60.63), merge5_c1.0 (66.00),
-MOPD_merge1.0 (65.45). That leaves nine jobs — six new H1/H2 models plus three
-fp32-inference arms — at roughly 83 min each, split across three nodes.
+由于 fp32 存储不改变评测分数（第 5 节），有三个模型已经有 n=16 的结果，不再重跑：merge5_c0.4（60.63）、merge5_c1.0（66.00）、MOPD_merge1.0（65.45）。剩下九个作业 —— 六个新的 H1/H2 模型加三个 fp32 推理分支 —— 每个约 83 分钟，分摊到三个节点上。
 
-**Precision control.** Only the fp32-inference arm needs running; it is compared
-against the published bf16 numbers above. Results land in `eval_n16_float32/`
-(`run_eval_experts.sh` now appends the dtype only when it is not bfloat16, so
-existing paths are untouched). `merge5_c0.4` is the decisive one: a clear rise
-under fp32 confirms the rising limb of the c-sweep is partly an artifact.
+**精度对照。** 只有 fp32 推理分支需要跑；它与上面已发布的 bf16 数字对比。结果落在 `eval_n16_float32/`
+（`run_eval_experts.sh` 现在只在 dtype 不是 bfloat16 时追加后缀，因此既有路径不受影响）。`merge5_c0.4` 是决定性的那个：若它在 fp32 下有清晰上升，就确认 c 扫描的上升段有一部分是人造产物。
 
-Decision rules were fixed before running; see
-`research/experiments/20260920_mopd_extrapolation/README.md`.
+判定规则在运行之前已固定；见
+`research/experiments/20260920_mopd_extrapolation/README.md`。
 
 ---
 
-## Recommendations
+## 建议
 
-1. **Re-derive the AVG8 column** and audit whatever produced the published values.
-   `merge5_c1.0` = 66.00 makes merge and MOPD_merge1.0 comparable, not ranked.
-2. **Report pass@16 alongside mean@16.** It is the evidence that merging sharpens
-   rather than extends, and it is already computed in every `n16` log.
-3. **No correction to the c-sweep is needed**, and no score needs re-running for
-   precision. The control settled this: bf16 rounding discards up to 28.5% of
-   ‖τ‖ with no measurable effect on quality. The effective-coefficient table in
-   `results.md` §2.1 is worth keeping as a *caveat about ‖τ‖ as a metric*, not as
-   a correction to the scores.
-4. **Stop treating ‖τ‖ as functional magnitude.** The rounding result shows the
-   smallest-magnitude coordinates carry a large share of the L2 norm and almost
-   none of the function. Any norm-matched control — including
-   `../experiments/20260916_norm_matched_subsets` — equalizes a loosely-related
-   quantity, and that should be stated where those controls are used.
-5. **Frame merging as "many orthogonal directions summing inside a linear
-   regime."** Three independent lines support it: more directions win at fixed
-   norm (5 > 4 > 3), either half of a split τ_merge loses equally (§6), and
-   orthogonality is what keeps the five-expert sum at 0.146% rather than 0.319%
-   of ‖θ_base‖. Explicitly *not* supported: "small updates cause orthogonality,"
-   and "merging works by avoiding conflict."
-6. **Fix mixed-RL by rebalancing on gradient-carrying groups**, not prompt counts.
-   The current run's IF domain is untrained, so it is not yet a fair baseline for
-   "joint RL vs merging" — but it is a strong basis for a paper on *why* joint RL
-   underperforms (threshold effect, not slowdown).
-7. **Quote 0.4580** for student–teacher cosine (both endpoints fp32). Earlier
-   values of 0.323 and 0.3555 understate it; the right reference scale is the
-   1.6e-5 random baseline and the ≤0.0222 expert–expert pairs.
-8. **Keep the geometry gate.** Asserting norms and cosines against closed-form
-   predictions before evaluating caught two modeling defects that would otherwise
-   have produced clean-looking but meaningless benchmark numbers.
+1. **重新推导 AVG8 那一列**，并审计产出那些已发布数值的东西。
+   `merge5_c1.0` = 66.00 使 merge 与 MOPD_merge1.0 相当，而非分出高下。
+2. **把 pass@16 与 mean@16 一并报告。** 它是「合并是锐化而非扩展」的证据，而且每个 `n16` 日志里都已经算好了。
+3. **c 扫描不需要修正**，也没有任何分数需要以精度为由重跑。对照已经解决了这个问题：bf16 舍入丢掉最多 28.5% 的 ‖τ‖，对质量没有任何可测量的影响。`results.md` §2.1 里那张有效系数表值得作为**对 ‖τ‖ 这个度量本身的警示**保留，而不是作为对分数的修正。
+4. **不要再拿 ‖τ‖ 当作功能强度。** 舍入的结果表明，幅值最小的那些坐标承载了 L2 范数的很大份额，却几乎不承载函数。任何范数匹配的对照 —— 包括 `../experiments/20260916_norm_matched_subsets` —— 都在均衡一个只有松散关系的量，这一点应当在用到这些对照的地方写明。
+5. **把合并框定为「众多正交方向在线性区间内求和」。** 有三条独立的证据线支持它：固定范数下方向更多者胜（5 > 4 > 3）、把 τ_merge 劈成两半后任一半损失相同（第 6 节）、以及正交性正是使五专家求和落在 ‖θ_base‖ 的 0.146% 而非 0.319% 的原因。明确**不受**支持的：「小更新导致正交性」，以及「合并通过避免冲突而奏效」。
+6. **修复混合 RL 要靠按携带梯度的 group 配平**，而不是按 prompt 数。当前这次运行的 IF 域根本没被训练起来，所以它还不是「联合 RL vs 合并」的公平基线 —— 但它是一篇关于*为什么*联合 RL 表现不佳的论文的良好基础（阈值效应，而非减速）。
+7. **学生–教师余弦请引用 0.4580**（两端点均为 fp32）。早先的 0.323 和 0.3555 都低估了它；正确的参照尺度是 1.6e-5 的随机基线以及 ≤0.0222 的专家–专家配对。
+8. **保留那道几何门禁。** 在评测之前把范数和余弦对着闭式预测做断言，抓到了两个建模缺陷；否则它们本会产出看起来干净、实则毫无意义的 benchmark 数字。
 
-## Predictions this session got wrong
+## 本次 session 做错的预测
 
-Recorded because the pattern is informative: every wrong call over-weighted a
-*measured intermediate quantity* (‖τ‖, cosine, rounding loss) as a proxy for
-function, and each was caught only by running the control.
+记录在此是因为这个模式有信息量：每一个错误的判断都过度看重了某个*测量到的中间量*（‖τ‖、余弦、舍入损失），把它当作功能的代理；而每一个都只有在跑了对照之后才被发现。
 
-| prediction | outcome |
+| 预测 | 结果 |
 |---|---|
-| bf16 rounding depresses low-c scores; c-sweep needs correcting | refuted (−0.85 at c=0.4) |
-| bf16 penalizes MOPD more than merge, biasing the head-to-head | refuted (−0.07 vs −0.41) |
-| τ_MOPD is a functional subspace of τ_merge, so the parallel part should retain most ability when norm-matched | refuted (60.04, worst in table) |
-| merge5_c1.0's ‖τ‖ matched √Σ‖τᵢ‖² to four decimals | arithmetic error; correct check needs cross terms (2.3057 vs 2.3058) |
-| the n=4 screen would be adequate to rank these models | refuted; it reversed the n=16 ordering |
-| mix-RL's IF domain shows a *threshold* effect (no progress at all) | over-claimed; slopes show 0.29× slowdown, ~1.95× better than linear-in-share |
-| IF stagnation is "self-locking": no progress → variance stays low → no gradient | sign backwards; healthy learning *decays* variance (expert_if 0.120 → 0.066 with zero-var rising to 81%) |
-| effective gradient share governs which domains learn | insufficient; Code has more effective groups than IF and is completely frozen — difficulty is a second, independent factor |
-| IF is the run's worst-off domain | Code is worse (dWrong/dt 0.01× vs IF's 0.17×) and holds the largest prompt share |
-| extrapolating τ_MOPD would simply not help | half right: mean@16 falls as predicted, but α=1.15 gives the project's 2nd-best pass@16 (80.42 > teacher's 80.28) |
+| bf16 舍入压低了低 c 的分数；c 扫描需要修正 | 被推翻（c=0.4 时 −0.85） |
+| bf16 对 MOPD 的惩罚大于对 merge 的惩罚，使正面对比有偏 | 被推翻（−0.07 对 −0.41） |
+| τ_MOPD 是 τ_merge 的一个功能子空间，因此范数匹配后平行部分应保留大部分能力 | 被推翻（60.04，全表最差） |
+| merge5_c1.0 的 ‖τ‖ 与 √Σ‖τᵢ‖² 吻合到四位小数 | 算术错误；正确的检查需要交叉项（2.3057 对 2.3058） |
+| n=4 筛选足以给这些模型排序 | 被推翻；它反转了 n=16 的排序 |
+| mix-RL 的 IF 域呈现*阈值*效应（毫无进展） | 过度声明；斜率显示为 0.29× 减速，比按份额线性预测要好约 1.95× |
+| IF 停滞是「自锁」：无进展 → 方差保持低 → 无梯度 | 符号反了；健康的学习会使方差*衰减*（expert_if 0.120 → 0.066，同时零方差升到 81%） |
+| 有效梯度份额决定哪些域能学到东西 | 不充分；Code 的有效 group 比 IF 多，却完全冻结 —— 难度是第二个独立因子 |
+| IF 是这次运行中最糟糕的域 | Code 更糟（dWrong/dt 0.01× 对 IF 的 0.17×），且握有最大的 prompt 份额 |
+| 外推 τ_MOPD 只会没有帮助 | 一半对：mean@16 如预测般下降，但 α=1.15 给出了项目第二好的 pass@16（80.42 > 教师的 80.28） |

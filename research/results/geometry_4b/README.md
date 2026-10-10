@@ -1,34 +1,21 @@
-# 4B Task-Vector Geometry
+# 4B Task-Vector 几何
 
-The statistics in this directory were computed directly from the fp32 base and five fp32 RLVR experts using `analyze_task_vector_geometry.py`.
+本目录中的统计量是用 `analyze_task_vector_geometry.py` 直接从 fp32 基座与五个 fp32 RLVR 专家上算出来的。
 
-## Initial findings
+## 初步发现
 
-- Global task-vector norms are Math 0.988, Science 1.023, Code 0.850, IF 1.322, and Agent 0.869.
-- Reasoning vectors are weakly but consistently aligned: Math–Science cosine 0.0222, Math–Code 0.0088, Science–Code 0.0023.
-- Pairs involving IF or Agent have global cosine close to zero; IF–Agent is slightly negative (-0.00057).
-- IF and Agent have less than 0.001% of their global energy projected into the span of Math/Science/Code. A global PCA/shared-vector decomposition is therefore unlikely to explain their apparent reasoning gains.
-- The five-expert λ=1.0 update norm is 1.376 times the MCS λ=1.0 update norm. Expert-count comparisons require a norm-matched control.
-- Local structure is stronger than global structure: some attention matrices reach pairwise cosine around 0.1, while one-dimensional normalization tensors show larger but low-energy positive and negative correlations.
+- 全局 task-vector 范数：Math 0.988、Science 1.023、Code 0.850、IF 1.322、Agent 0.869。
+- 推理向量之间弱但一致地对齐：Math–Science 余弦 0.0222，Math–Code 0.0088，Science–Code 0.0023。
+- 涉及 IF 或 Agent 的配对，全局余弦接近零；IF–Agent 略微为负（−0.00057）。
+- IF 和 Agent 投射到 Math/Science/Code 张成空间中的全局能量不足 0.001%。因此，全局 PCA / 共享向量分解不太可能解释它们表面上的推理增益。
+- 五专家 λ=1.0 的更新范数是 MCS λ=1.0 的 1.376 倍。做专家数量对比时必须要有范数匹配的对照组。
+- 局部结构强于全局结构：某些 attention 矩阵的两两余弦达到约 0.1，而一维的归一化张量表现出更大但低能量的正负相关性。
 
-These findings motivate matrix-level spectral or functional analysis and rule out treating one global cosine as a sufficient measure of transfer.
+这些发现推动了矩阵级的谱分析或功能分析，并排除了「把单一全局余弦当作迁移的充分度量」。
 
-## Threshold-Free Overlap
+## 无阈值重叠
 
-`continuous_overlap.json`, `continuous_pair_summary.csv`, and
-`continuous_tensor_hotspots.csv` separate magnitude overlap from signed
-alignment. Across all expert pairs, absolute cosine is about `0.63` even when
-ordinary cosine is nearly zero. Importantly, `2/pi = 0.6366` is also the
-expected absolute cosine of independent zero-mean Gaussian coordinates, so
-this value alone is **not** evidence of shared support. Positive and negative
-products almost exactly cancel (`same-sign product fraction ≈ 0.50`).
+`continuous_overlap.json`、`continuous_pair_summary.csv` 与
+`continuous_tensor_hotspots.csv` 把幅值重叠与带符号的对齐区分开来。在所有专家配对上，绝对余弦约为 `0.63`，即便普通余弦近乎为零。重要的是，`2/pi = 0.6366` 也正是独立零均值高斯坐标的期望绝对余弦，所以**单凭这个值并不能**作为共享支撑的证据。正负乘积几乎恰好抵消（同号乘积占比 ≈ 0.50）。
 
-The energy-weighted effective number of experts is `2.445`, compared with
-about `2.561` in a matched five-vector Gaussian simulation; update dominance
-is `0.581` versus a `0.555` null. Most dense transformer matrices are therefore
-close to a random-independent coordinate baseline, with only a modest excess
-of task concentration. Embeddings are the clear exception: their pairwise
-absolute cosine and energy Jaccard are far below the null-like matrix values,
-especially for IF and Agent. Static coordinate overlap is consequently too
-weak a basis for declaring a shared vector; sharedness should be measured in a
-module subspace or on the data-induced function response.
+按能量加权的有效专家数为 `2.445`，而在匹配的五向量高斯模拟中约为 `2.561`；更新主导度为 `0.581`，而零假设是 `0.555`。因此，大多数稠密 transformer 矩阵都接近随机独立坐标的基线，只有适度的任务集中超出。Embedding 是明确的例外：它们的两两绝对余弦与能量 Jaccard 远低于那些类零假设的矩阵值，对 IF 和 Agent 尤其如此。因此，静态坐标重叠作为「声明存在一个共享向量」的依据太弱；共享性应当在模块子空间中、或在数据诱导的功能响应上去测量。

@@ -1,46 +1,31 @@
-# Why Parallel-then-Merge Beats Joint RL
+# 为什么「先并行训练再合并」优于「联合 RL」
 
-Status: proposal. Parts 2–3 are measured and settled. Part 1 now rests on a
-**two-factor diagnosis** supported by per-domain dynamics within a single run
-(two failure modes, two healthy controls); its remaining gap is confirming that
-the two modes are independently fixable, which is E7. Updated 2026-09-22.
-Supersedes the framing in
-[../results/20260920_session_summary.md](../results/20260920_session_summary.md),
-whose numbers remain valid.
+状态：提案。第 2–3 部分已测量并有定论。第 1 部分现在依赖一个**双因子诊断**，由单次运行内的逐域动态支撑（两种失效模式、两个健康对照组）；它剩下的缺口是确认这两种模式是否可被**独立**修复，也就是 E7。更新于 2026-09-22。
+本文取代了[../results/20260920_session_summary.md](../results/20260920_session_summary.md)中的论述框架，但该文件的数字仍然有效。
 
-## Thesis
+## 论点
 
-Multi-domain capability fusion is limited by two quantities that the existing
-literature does not name:
+多域能力融合受制于现有文献并未命名的两个量：
 
-1. **Joint RLVR fails per-domain, for two distinct and separately-fixable
-   reasons.** Effective gradient share (not prompt share) governs one failure
-   mode; task difficulty relative to current capability governs the other. A
-   single five-domain run exhibits both, plus two healthy domains as controls.
-2. **The linear-regime budget** of the base model — merging works because
-   orthogonal task vectors sum to a displacement that stays inside the region
-   where the model responds additively.
+1. **联合 RLVR 在每个域上都会失败，且出于两种各自独立、可分别修复的原因。** 其中一种失效模式由**有效梯度份额**（而非 prompt 份额）主导；另一种由**任务难度相对当前能力**主导。单次五域运行同时展现了这两种模式，外加两个健康域作为对照。
+2. **基座模型的线性区间预算** —— 合并之所以有效，是因为相互正交的 task vector 相加后，其位移仍落在模型呈加性响应的区域内。
 
-Parallel-then-merge wins because it is subject to neither: each expert owns its
-full gradient at its own difficulty curriculum, and orthogonality keeps the sum
-within budget.
+「先并行训练再合并」之所以胜出，是因为它不受这两者的约束：每个专家在自己的难度课程下独占全部梯度，而正交性使求和结果保持在预算之内。
 
 ---
 
-## Part 1 — Why joint RL underperforms
+## 第 1 部分 —— 为什么联合 RL 表现不佳
 
-### What is measured
+### 已测量到的事实
 
-`train_mix_8x8_20260919_162504` (Qwen3-4B, GRPO, 5 domains). Five of six
-benchmark axes improve normally; IF does not.
+`train_mix_8x8_20260919_162504`（Qwen3-4B，GRPO，5 个域）。六条基准轴中有五条正常提升，IF 没有。
 
 | step | aime25 | gpqa | bfcl | **ifbench** | **ifeval** |
 |---|---:|---:|---:|---:|---:|
 | 0 | 43.33 | 56.69 | 63.00 | **31.08** | **84.20** |
 | 275 | 46.67 | 60.10 | 71.13 | **32.75** | **85.58** |
 
-Per-domain GRPO group statistics (rollout dumps, steps 90–99,
-`research/group_stats.py`):
+逐域 GRPO group 统计（rollout dump，step 90–99，`research/group_stats.py`）：
 
 | domain | prompt share | zero-variance groups | mean group std | **effective gradient share** |
 |---|---:|---:|---:|---:|
@@ -49,123 +34,72 @@ Per-domain GRPO group statistics (rollout dumps, steps 90–99,
 | Code | 21.9% | 59.0% | 0.105 | 25.6% |
 | **IF** | **18.9%** | **68.4%** | **0.117** | **14.7%** |
 
-Under GRPO a group with zero reward variance yields zero advantage, so nominal
-mixture and effective update share decouple. IF is the sparsest domain and the
-most diluted.
+在 GRPO 下，reward 方差为零的 group 产生零 advantage，因此名义混合比例与有效更新份额脱钩。IF 是最稀疏、也被稀释得最厉害的域。
 
-### Per-domain dynamics: two failure modes, two healthy controls
+### 逐域动态：两种失效模式，两个健康对照
 
-Static group counts hide what is actually happening. Tracking the *composition*
-of each domain's groups over training (`research/variance_trajectory.py`, 90-step
-windows, steps 1–270) separates three distinct behaviours. Rates are per step,
-against the expert_if reference of dWrong/dt = −0.159, dRight/dt = +0.227:
+静态的 group 计数掩盖了实际发生的事情。追踪每个域的 group **构成**随训练的变化（`research/variance_trajectory.py`，90 步窗口，step 1–270）可以分离出三种截然不同的行为。速率按每步计，对照 expert_if 的参考值 dWrong/dt = −0.159、dRight/dt = +0.227：
 
-| domain | prompt share | eff groups/step | dWrong/dt | vs expert | dRight/dt | vs expert | group std | verdict |
+| domain | prompt share | eff groups/step | dWrong/dt | vs expert | dRight/dt | vs expert | group std | 判定 |
 |---|---:|---:|---:|---:|---:|---:|---|---|
-| **Science** | 19.5% | 15.8 | −0.0067 | 0.04× | **+0.0539** | **0.24×** | 0.216 → **0.182** | healthy |
-| **Agent** | 14.8% | — | — | — | — | — | 0.500 → **0.426** | healthy (score +0.280) |
-| **Math** | 23.4% | 19.5 | +0.0078 | −0.05× | +0.0039 | 0.02× | 0.243 → 0.233 | **saturated** |
-| **IF** | 18.0% | 7.7 | −0.0267 | 0.17× | +0.0217 | 0.10× | 0.120 → 0.124 | **starved** |
-| **Code** | **24.2%** | 10.4 | **−0.0011** | **0.01×** | **+0.0044** | 0.02× | 0.085 → 0.083 | **frozen** |
+| **Science** | 19.5% | 15.8 | −0.0067 | 0.04× | **+0.0539** | **0.24×** | 0.216 → **0.182** | 健康 |
+| **Agent** | 14.8% | — | — | — | — | — | 0.500 → **0.426** | 健康（分数 +0.280） |
+| **Math** | 23.4% | 19.5 | +0.0078 | −0.05× | +0.0039 | 0.02× | 0.243 → 0.233 | **饱和** |
+| **IF** | 18.0% | 7.7 | −0.0267 | 0.17× | +0.0217 | 0.10× | 0.120 → 0.124 | **饥饿** |
+| **Code** | **24.2%** | 10.4 | **−0.0011** | **0.01×** | **+0.0044** | 0.02× | 0.085 → 0.083 | **冻结** |
 
-**Healthy learning looks like variance *decay*, not growth.** expert_if's group
-std falls 0.120 → 0.087 → 0.066 while zero-variance groups *rise* 68% → 81%,
-because all-wrong groups convert to all-right ones (wrong 42.7% → 18.0%, right
-25.3% → 62.9%) — the domain is being solved. Science and Agent show the same
-signature inside the mixed run, which is important: **joint RL is not broadly
-harmful; two of five domains progress normally.**
+**健康的学习表现为方差*衰减*，而非增长。** expert_if 的 group std 从 0.120 → 0.087 → 0.066 下降，而零方差 group 占比*上升* 68% → 81%，因为全错 group 正在转化为全对 group（wrong 42.7% → 18.0%，right 25.3% → 62.9%）——这个域正在被解出来。Science 和 Agent 在混合运行中展现出同样的特征，这一点很重要：**联合 RL 并非普遍有害；五个域中有两个在正常推进。**
 
-**Code is the worse pathology, and it is not dilution.** Its all-wrong share is
-immobile across 275 steps (57.6% → 57.4%, 0.01× the expert rate) and right%
-never exceeds 3%, *despite* holding the largest prompt share (24.2%) and more
-effective groups per step than IF (10.4 vs 7.7). **Gradient supply is adequate
-and it still does not learn** — the task is simply beyond current capability, so
-57% of prompts are permanently all-wrong. More batch cannot fix this.
+**Code 是更严重的病理，而且它不是稀释。** 它的全错占比在 275 步中纹丝不动（57.6% → 57.4%，仅为专家速率的 0.01×），right% 从未超过 3%，**尽管**它握有最大的 prompt 份额（24.2%）、每步有效 group 数也比 IF 多（10.4 对 7.7）。**梯度供给是充足的，而它仍然学不动** —— 任务只是超出了当前能力，于是 57% 的 prompt 永久处于全错状态。加大 batch 修不了这个。
 
-**Math is saturated, not failing.** It starts at score 0.573 with only 16%
-all-wrong, and moves ±0.01 — it is already near this data's ceiling.
+**Math 是饱和，不是失败。** 它以 score 0.573 起步、全错仅 16%，并在 ±0.01 内移动 —— 它已经接近这批数据的天花板。
 
-**Agent explains the mechanism from the other side.** BFCL's reward is
-continuous, so its group std is 0.43–0.50 (2–4× every other domain) and its
-zero-variance rate is **0.0%** — every group carries gradient. It also learns
-fastest (score 0.482 → 0.762). This is direct support for within-group spread,
-not prompt count, driving learning rate.
+**Agent 从反面印证了该机制。** BFCL 的 reward 是连续值，所以它的 group std 达 0.43–0.50（是其他所有域的 2–4 倍），零方差率为 **0.0%** —— 每个 group 都携带梯度。它也是学得最快的（score 0.482 → 0.762）。这是对「驱动学习速率的是 group 内离散度、而非 prompt 数量」的直接支持。
 
-### Revised claim: a 2×2 diagnosis
+### 修订后的主张：一个 2×2 诊断
 
-The single-factor story ("effective gradient share governs learning") is too
-coarse — Code refutes it. The defensible claim is two-dimensional, and **one run
-populates all the informative cells**:
+单因子的说法（「有效梯度份额主导学习」）过于粗糙 —— Code 就反驳了它。可辩护的主张是二维的，而且**一次运行就填满了所有有信息的格子**：
 
-| | gradient supply adequate | gradient supply starved |
+| | 梯度供给充足 | 梯度供给饥饿 |
 |---|---|---|
-| **task within capability** | healthy (Science, Agent) | **starvation** (IF) — fixable by batch/mixture |
-| **task beyond capability** | **difficulty freeze** (Code) — batch is useless | both at once |
+| **任务在能力范围内** | 健康（Science、Agent） | **饥饿**（IF）—— 可通过 batch/混合比例修复 |
+| **任务超出能力范围** | **难度冻结**（Code）—— batch 无用 | 两者同时发生 |
 
-This is stronger than the original because the two failure modes predict
-*different* remedies, which is testable (E3 vs E7). It also explains why E1's
-batch increase only partially recovers IF: batching addresses one cell and leaves
-Code — 24% of prompts and ~23% of effective gradient — untouched and largely
-wasted.
+这比原来的说法更强，因为两种失效模式预测的是**不同的**补救措施，而这是可检验的（E3 对 E7）。它也解释了为什么 E1 加大 batch 只能部分挽回 IF：加大 batch 只解决了一个格子，而 Code —— 占 24% 的 prompt 和约 23% 的有效梯度 —— 被原封不动地留在一旁并大量浪费掉。
 
-### Metric caveat: group variance is two-sided
+### 指标警示：group 方差是双向的
 
-`grp_std` is low in two opposite situations — a domain that has not started
-(IF/Code: high all-wrong) and one that has finished (expert_if late: high
-all-right). Both show high zero-variance rates (65% vs 81%) with inverted
-meaning. **Diagnosing progress requires the wrong%/right% decomposition, not
-variance or group counts alone.** Consequently, weighting effective gradient
-share by mean group std — as the earlier analysis did — is biased: IF's low
-spread in the mixture means "not started," while in the expert run it means
-"solved." We propose reporting **dWrong/dt** (curriculum unlock rate) and
-**dRight/dt** (solve rate) as the primary diagnostics.
+`grp_std` 在两种相反的情形下都会偏低 —— 一个还没起步的域（IF/Code：all-wrong 高）和一个已经完成的域（expert_if 后期：all-right 高）。两者都表现出高零方差率（65% 对 81%），但含义相反。**诊断进展需要 wrong%/right% 分解，光靠方差或 group 计数是不够的。** 因此，像早先分析那样用 mean group std 来加权有效梯度份额是有偏的：IF 在混合中离散度低意味着「还没起步」，而在专家运行中则意味着「已解出」。我们建议把 **dWrong/dt**（课程解锁速率）和 **dRight/dt**（解出速率）作为主要诊断量来报告。
 
-### The controlled comparison
+### 受控对比
 
-Training IF alone has an **even higher** degeneracy rate, yet it learns:
+单独训练 IF 时退化率**更高**，但它照样在学：
 
-| run | zero-var | gradient share | IF reward trajectory | slope |
+| run | zero-var | gradient share | IF reward 轨迹 | slope |
 |---|---:|---:|---|---:|
-| expert_if (IF only) | **70.9%** | 100% | 0.378 → 0.459 → 0.498 → **0.559** | +0.00226/step |
+| expert_if（仅 IF） | **70.9%** | 100% | 0.378 → 0.459 → 0.498 → **0.559** | +0.00226/step |
 | mix-RL | 68.4% | 14.7% | 0.365 → 0.370 → **0.404** | +0.00065/step |
 
-This rules out "IF is intrinsically too hard" and points at dilution.
+这排除了「IF 本质上太难」，并指向稀释。
 
-### Correction to an earlier claim
+### 对早先一项主张的更正
 
-An earlier draft described this as a **threshold effect** (the domain stops
-learning entirely below some share). **The slope data does not support that.**
-mix-RL's IF reward rises at 0.29× the expert's rate, while its effective
-gradient share is 0.147 — i.e. the observed slowdown is ~1.95× *better* than a
-linear-in-gradient-share prediction. That is consistent with graceful linear
-slowdown, not collapse.
+更早的草稿把这描述成一个**阈值效应**（域在份额低于某个值后就完全停止学习）。**斜率数据不支持这一点。** mix-RL 的 IF reward 以专家速率的 0.29× 上升，而它的有效梯度份额是 0.147 —— 也就是说，观测到的减速比「按梯度份额线性预测」要好约 1.95×。这与「平缓的线性减速」一致，而不是崩溃。
 
-The defensible claim is therefore weaker and more precise: **IF is diluted to
-~0.29× learning rate, which within a 250-step budget renders it visually flat on
-benchmarks while still moving in training reward.** Whether any genuine
-threshold exists is an open question the dilution curve below is designed to
-answer.
+因此可辩护的主张更弱也更精确：**IF 被稀释到约 0.29× 的学习速率，这在 250 步的预算内使其在 benchmark 上看起来是平的，但训练 reward 仍在移动。** 是否真的存在阈值，是下面那条稀释曲线所要回答的开放问题。
 
-### The blocking experiment
+### 卡住的那个实验
 
-**The current evidence cannot separate dilution from interference.** mix-RL and
-expert_if use the *same* batch configuration (`train_batch_size=128`,
-`rollout.n=16`), so IF receives roughly 1/5 the absolute number of effective
-groups per step in the mix. Two hypotheses predict the same observation:
+**现有证据无法区分稀释与干扰。** mix-RL 和 expert_if 使用*相同*的 batch 配置（`train_batch_size=128`、`rollout.n=16`），所以 IF 在混合中每步拿到的有效 group 绝对数约为 1/5。两个假设预测的是同一个观测：
 
-- **H-dilution** — IF simply gets too few effective groups per step. Scaling the
-  batch restores it.
-- **H-interference** — sharing parameters with four other domains degrades IF
-  regardless of sample count. Scaling the batch does not help, since the
-  proportion is unchanged.
+- **H-稀释** —— IF 每步拿到的有效 group 太少。放大 batch 可以恢复它。
+- **H-干扰** —— 与另外四个域共享参数会损害 IF，且与样本数无关。放大 batch 无用，因为比例没变。
 
-A reviewer will ask "isn't this just undertraining?", and today there is no
-answer. **This is the single highest-priority experiment.**
+审稿人会问「这不就是欠训练吗？」，而目前没有答案。**这是最高优先级的单项实验。**
 
-#### E1: batch-size scaling — running, interim result
+#### E1：batch size 放大 —— 正在跑，阶段性结果
 
-`train_mix_8x8_20260921_164602`: bs=512, lr=2e-6, 78 steps so far, grad_norm
-stable at 0.013–0.02 (healthy).
+`train_mix_8x8_20260921_164602`：bs=512，lr=2e-6，已跑 78 步，grad_norm 稳定在 0.013–0.02（健康）。
 
 | run | IF eff groups/step | vs expert_if | IF reward slope | vs expert | dWrong/dt | vs expert |
 |---|---:|---:|---:|---:|---:|---:|
@@ -173,68 +107,38 @@ stable at 0.013–0.02 (healthy).
 | mix @bs128 | 7.6 | 0.20× | 0.00065 | 0.29× | −0.027 | 0.17× |
 | **mix @bs512** | **30.6** | **0.82×** | **0.00115** | **0.51×** | **−0.105** | **0.66×** |
 
-Batching restored gradient supply to 0.82× parity, but recovery is partial:
-0.51× by reward slope, 0.66× by curriculum unlock rate. **Pure dilution predicts
-0.82×; observed is 62–80% of that.** So dilution is the dominant factor with a
-residual gap of roughly a third. IF's zero-variance rate is unchanged at ~70%,
-confirming that batching adds samples without shifting the difficulty
-distribution.
+加大 batch 把梯度供给恢复到 0.82× 的等价水平，但恢复是部分的：按 reward 斜率算是 0.51×，按课程解锁速率算是 0.66×。**纯稀释预测的是 0.82×；实测只有它的 62–80%。** 所以稀释是主导因素，但仍残留约三分之一的缺口。IF 的零方差率维持在 ~70% 不变，说明加大 batch 只是增加了样本，并没有改变难度分布。
 
-Slopes are estimated over ~78 steps and are noisy; recheck at 150–200 steps.
-Note also that bs512 raised lr to 2e-6, so batch and lr effects are currently
-entangled — the B′ arm below separates them.
+斜率是在约 78 步上估计的，噪声较大；请在 150–200 步时复查。另注意 bs512 把 lr 提到了 2e-6，所以 batch 与 lr 的效应目前是纠缠在一起的 —— 下面的 B′ 分支用于分离二者。
 
-| arm | train_batch_size | lr | status |
+| 分支 | train_batch_size | lr | 状态 |
 |---|---|---|---|
-| A (baseline) | 128 | 1e-6 | done, 0.29× / 0.17× |
-| B | 512 | 2e-6 | **running**, 0.51× / 0.66× at step 78 |
-| B′ | 512 | 1e-6 | not run — separates batch from lr |
-| C | 512, 1/4 the steps | 2e-6 | not run — equal total samples |
+| A（基线） | 128 | 1e-6 | 已完成，0.29× / 0.17× |
+| B | 512 | 2e-6 | **运行中**，step 78 时 0.51× / 0.66× |
+| B′ | 512 | 1e-6 | 未跑 —— 用于分离 batch 与 lr |
+| C | 512，步数取 1/4 | 2e-6 | 未跑 —— 等量总样本 |
 
-**Decision rule, fixed in advance.** ≥0.8× supports pure dilution; ≤0.5×
-indicates real interference. The interim 0.51–0.66× straddles this, so B′ and C
-are needed before the claim is safe.
+**事先固定的判定规则。** ≥0.8× 支持纯稀释；≤0.5× 说明存在真实的干扰。阶段性的 0.51–0.66× 正好骑在这条线上，所以在主张变得可靠之前，B′ 和 C 是必需的。
 
-#### E2: dilution curve (functional form)
+#### E2：稀释曲线（函数形式）
 
-Hold IF's absolute prompt count fixed; vary the other domains so IF's share is
-{100%, 50%, 25%, 19%, 10%}. Plot IF slope against effective gradient share.
-A kink identifies a threshold; a straight line confirms graceful degradation.
-This is what upgrades the finding from observation to mechanism, and it settles
-the question raised by the correction above.
+固定 IF 的绝对 prompt 数；改变其他域，使 IF 的份额取 {100%, 50%, 25%, 19%, 10%}。把 IF 斜率对有效梯度份额作图。出现拐点即说明存在阈值；是一条直线则确认为平缓退化。这正是把该发现从「观测」升级为「机制」的东西，也解决了上面那条更正所提出的问题。
 
-Rebalancing by effective group count and difficulty filtering — previously
-listed here as separate E3/E4 — are now arms 2 and 1 of
-[E7](#e7-difficulty-stratified-diagnosis-4x8-node-parallel), which runs them
-together so their independence can be tested rather than assumed. If IF recovers
-under rebalancing without harming other domains, the prescription is: **size the
-batch and mixture by the sparsest domain's effective group count, not by prompt
-count.**
+按有效 group 数重新配平、以及难度过滤 —— 之前在这里列为独立的 E3/E4 —— 现在是[E7](#e7-难度分层诊断-4x8-节点并行)的第 2 和第 1 个分支，E7 把它们放在一起跑，以便检验（而非假定）它们的独立性。如果 IF 在重新配平后恢复、同时不损害其他域，那么处方就是：**按最稀疏域的有效 group 数来决定 batch 与混合比例，而不是按 prompt 数。**
 
-### Why existing theory does not cover this
+### 为什么现有理论覆盖不到这一点
 
-Multi-task gradient-conflict methods (PCGrad, CAGrad, and successors) assume
-task gradients point in competing directions. Here the five task vectors are
-mutually orthogonal to within cosine ≤ 0.0222 (§Part 2) — there is essentially
-no conflict to resolve. The mechanism lives in the *reward* layer and is
-specific to verifier-based RL, where group-relative advantages vanish on
-all-correct and all-wrong groups.
+多任务梯度冲突类方法（PCGrad、CAGrad 及其后继）假设各任务的梯度指向相互竞争的方向。而这里五个 task vector 两两正交到余弦 ≤ 0.0222（见第 2 部分）—— 基本上没有冲突可供消解。该机制位于 *reward* 层，并且是 verifier-based RL 特有的：在那里，group 相对 advantage 在全对 group 和全错 group 上都会消失。
 
-### Data hygiene
+### 数据卫生
 
-The 8×8 run **diverged after step 300** and must not be used past that point:
-grad_norm spiked 0.039 → 0.507, response length blew up to 15093 tokens (92%
-truncated), entropy collapsed to 0.009, and aime25/aime26/gpqa/ifbench all went
-to zero. `global_step_275` is the last healthy checkpoint (aime25 46.67, ifbench
-32.75). The IF-stagnation finding is independent of this divergence — it is
-visible from step 0 — but any rerun should add gradient-norm clipping, and the
-paper's joint-RL baseline must be a healthy run.
+8×8 那次运行**在 step 300 之后发散了**，超过该点的数据不得使用：grad_norm 从 0.039 飙到 0.507，回答长度膨胀到 15093 token（92% 被截断），熵塌缩到 0.009，aime25/aime26/gpqa/ifbench 全部归零。`global_step_275` 是最后一个健康的 checkpoint（aime25 46.67，ifbench 32.75）。IF 停滞这一发现独立于该发散 —— 它从 step 0 就可见 —— 但任何重跑都应加上梯度范数裁剪，而且论文的联合 RL 基线必须是一次健康的运行。
 
 ---
 
-## Part 2 — Why merging succeeds (settled)
+## 第 2 部分 —— 为什么合并会成功（已有定论）
 
-All endpoints fp32; 398 shared tensors; ‖θ_base‖ = 1583.4033.
+所有端点均为 fp32；398 个共享张量；‖θ_base‖ = 1583.4033。
 
 | model | ‖τ‖ | ‖τ‖/‖θ_base‖ |
 |---|---:|---:|
@@ -242,176 +146,118 @@ All endpoints fp32; 398 shared tensors; ‖θ_base‖ = 1583.4033.
 | merge5_c1.0 | 2.3058 | 0.146% |
 | MOPD_merge1.0 | 1.6356 | 0.103% |
 
-**The experts are mutually orthogonal** (pairwise cosine ∈ [−0.0006, 0.0222]),
-and **task arithmetic is exactly a sum**: predicting ‖Στᵢ‖ from norms and the
-full cosine matrix gives 2.3057 against 2.3058 measured.
+**各专家相互正交**（两两余弦 ∈ [−0.0006, 0.0222]），而且 **task arithmetic 恰好就是求和**：用各范数和完整的余弦矩阵预测 ‖Στᵢ‖ 得 2.3057，实测 2.3058。
 
-**Orthogonality buys linear-regime headroom.** This is the causal chain, and it
-is not "orthogonality avoids conflict":
+**正交性换来了线性区间的余量。** 这是因果链，而且它不是「正交性避免了冲突」：
 
-- five aligned vectors would give ‖Στᵢ‖ = Σ‖τᵢ‖ = 5.0528 → **0.319%**
-- actually orthogonal: **0.146%**
-- measured degradation onset: ~**0.175%** (c=1.0 → 1.2, AVG8 66.00 → 65.08)
+- 五个对齐的向量会给出 ‖Στᵢ‖ = Σ‖τᵢ‖ = 5.0528 → **0.319%**
+- 实际正交：**0.146%**
+- 实测的退化起始点：约 **0.175%**（c=1.0 → 1.2，AVG8 66.00 → 65.08）
 
-Orthogonality shrinks the sum 2.19× and lands it inside the additive region.
+正交性把求和结果缩小了 2.19×，使其落在加性区域之内。
 
-**Explicitly falsified: "small updates cause orthogonality."** The *largest*
-task vector (expert_if, 1.3220) is the *most* orthogonal (max cosine 0.0003);
-the largest cosine is math–science, two semantically adjacent mid-norm domains.
-Orthogonality follows from task semantics and high dimension (random cosine
-≈ 1.6e-5), not from displacement size.
+**已被显式证伪：「更新量小导致正交」。** *最大*的 task vector（expert_if，1.3220）是*最*正交的（最大余弦 0.0003）；而最大的余弦出现在 math–science 之间，即两个语义相邻、范数中等的域。正交性源自任务语义与高维度（随机余弦 ≈ 1.6e-5），而非位移大小。
 
-**There is no dominant direction.** Splitting τ_merge against τ_MOPD
-(c = 0.6449) and evaluating each part at n=16 over the full suite:
+**不存在主导方向。** 把 τ_merge 相对 τ_MOPD 分解（c = 0.6449），并在完整套件上以 n=16 评估每一部分：
 
 | model | ‖τ‖ | mean@16 | pass@16 |
 |---|---:|---:|---:|
-| merge5_c1.0 (full) | 2.3058 | **66.00** | 80.28 |
+| merge5_c1.0（完整） | 2.3058 | **66.00** | 80.28 |
 | proj_parallel | 1.0560 | 63.68 | 78.56 |
 | proj_parallel_normmatched | 2.3058 | 60.04 | 75.48 |
 | proj_perp | 2.0497 | 60.38 | 77.39 |
 | proj_perp_normmatched | 2.3058 | 60.23 | 76.91 |
 
-At equal norm the two halves are indistinguishable (60.04 vs 60.23) and both
-lose ~6 points. Removing either half costs the same, so performance comes from
-**many independent directions summing**. Scaling the parallel part *up* to
-‖τ_merge‖ makes it worse (63.68 → 60.04) and damages convergence (pathologically
-long generations; aime25 pass@16 63.61, below base's 71.46).
+在等范数下两半无法区分（60.04 对 60.23），且都损失约 6 个点。去掉任意一半的代价相同，因此性能来自**众多独立方向的求和**。把平行分量*放大*到 ‖τ_merge‖ 反而更差（63.68 → 60.04）并损害收敛（生成长度病态地变长；aime25 pass@16 为 63.61，低于 base 的 71.46）。
 
-Independent confirmation: at fixed total norm, more directions is monotonically
-better — 5 (62.67) > 4 (62.28 / 61.71) > 3 (60.55), from
-`../experiments/20260916_norm_matched_subsets`.
+独立的佐证：在固定总范数下，方向越多单调越好 —— 5（62.67）> 4（62.28 / 61.71）> 3（60.55），来自
+`../experiments/20260916_norm_matched_subsets`。
 
 ---
 
-## Part 3 — The gain is sharpening, not new capability (settled)
+## 第 3 部分 —— 增益是锐化，而非新能力（已有定论）
 
-pass@16 separates "solves more problems" from "solves the same ones more
-reliably":
+pass@16 把「解出更多题」与「把同样的题解得更稳」区分开：
 
-| family | mean@16 gain | pass@16 gain |
+| family | mean@16 增益 | pass@16 增益 |
 |---|---:|---:|
-| mcs3, base → c=1.0 | +4.73 | +1.81 |
-| merge5, c=0.4 → c=1.0 | +5.37 | +3.62 |
+| mcs3，base → c=1.0 | +4.73 | +1.81 |
+| merge5，c=0.4 → c=1.0 | +5.37 | +3.62 |
 
-~60% of the mean@16 gain is pure sharpening. merge5's pass@16 gain is almost
-entirely one column (ifbench +19.0 across the sweep) while gpqa pass@16 actually
-*declines* (87.29 → 86.16). Instruction-following is the only axis where merging
-genuinely widens the frontier.
+mean@16 增益中约 60% 是纯粹的锐化。merge5 的 pass@16 增益几乎全部来自一列（ifbench 在整个扫描中 +19.0），而 gpqa 的 pass@16 实际上*下降*了（87.29 → 86.16）。指令遵循是合并真正拓宽了前沿的唯一一条轴。
 
-**Two independent mechanisms trace the same sharpness/coverage trade-off**,
-which is what makes this convincing:
+**两个彼此独立的机制描出了同一条锐化/覆盖度权衡曲线**，这正是它令人信服的地方：
 
-| knob | mean@16 | pass@16 |
+| 旋钮 | mean@16 | pass@16 |
 |---|---|---|
-| merge coefficient c: 1.0 → 1.2 | 66.00 → 65.08 | 80.28 → 80.11 |
-| MOPD extrapolation α: 1.0 → 1.15 | 65.45 → 65.23 | 79.87 → **80.42** |
-| MOPD extrapolation α: 1.0 → 1.30 | 65.45 → 63.07 | 79.87 → 77.94 |
+| 合并系数 c：1.0 → 1.2 | 66.00 → 65.08 | 80.28 → 80.11 |
+| MOPD 外推 α：1.0 → 1.15 | 65.45 → 65.23 | 79.87 → **80.42** |
+| MOPD 外推 α：1.0 → 1.30 | 65.45 → 63.07 | 79.87 → 77.94 |
 
-α=1.15 buys coverage at the cost of sharpness — ifbench pass@16 +3.22, gpqa
-+1.70, aime25 +1.00 — and posts **the second-highest pass@16 in the project
-(80.42), above its own teacher (80.28)**. α=1.30 overshoots and loses both. So
-extrapolation is not useless: it moves the operating point along the trade-off
-rather than adding capability. Weight-space merging and post-distillation
-extrapolation, two unrelated mechanisms, trace the same curve shape.
+α=1.15 以锐化为代价换来了覆盖度 —— ifbench pass@16 +3.22、gpqa +1.70、aime25 +1.00 —— 并录得**本项目第二高的 pass@16（80.42），高于它自己的教师（80.28）**。α=1.30 过冲，两者皆失。所以外推并非无用：它是沿着权衡曲线移动工作点，而不是增加能力。权重空间合并与蒸馏后外推，这两个毫不相干的机制，描出了同样形状的曲线。
 
-Corollary: sharpening is exactly what a mode-seeking distillation objective can
-reproduce, which explains how MOPD_merge1.0 matches its teacher (65.45 vs 66.00)
-and exceeds the three-expert merge on lcb_v5 (67.44 vs 67.10) and gpqa (64.49 vs
-63.60).
+推论：锐化恰恰是 mode-seeking 的蒸馏目标所能复现的东西，这解释了 MOPD_merge1.0 为何能追平它的教师（65.45 对 66.00），并在 lcb_v5（67.44 对 67.10）和 gpqa（64.49 对 63.60）上超过三专家合并。
 
 ---
 
-## Methodological contribution: ‖τ‖ is a poor proxy for functional magnitude
+## 方法论贡献：‖τ‖ 是功能强度的不良代理量
 
-bf16 inference discards every coordinate below one rounding unit — 28.5% of
-‖τ‖ at c=0.4. A matched control (same fp32 weights, only `ROLLOUT_DTYPE`
-changed, n=16) shows **no model improves under fp32**:
+bf16 推理会丢弃低于一个舍入单位的所有坐标 —— 在 c=0.4 时占 ‖τ‖ 的 28.5%。一项配平对照（同样的 fp32 权重，只改 `ROLLOUT_DTYPE`，n=16）显示**没有任何模型在 fp32 下变好**：
 
-| model | ‖τ‖ surviving bf16 | fp32 − bf16 |
+| model | ‖τ‖ 在 bf16 下的存活率 | fp32 − bf16 |
 |---|---:|---:|
 | merge5_c0.4 | 71.5% | **−0.85** |
 | merge5_c1.0 | 96.6% | −0.41 |
 | MOPD_merge1.0 | 87.2% | −0.07 |
 
-Discarding 28.5% of the L2 norm costs nothing measurable. This is a stronger
-form of the DARE observation — no rescaling is required.
+丢掉 28.5% 的 L2 范数没有带来任何可测量的代价。这是 DARE 观察的一个更强形式 —— 而且不需要重新缩放。
 
-**Consequence for this paper's own controls:** every norm-matched comparison —
-including Part 2's `*_normmatched` variants and the subset experiment —
-equalizes a quantity only loosely coupled to functional strength. The
-conclusions there survive because the *contrasts* are large and consistent, but
-the caveat must be stated. A better magnitude measure (Fisher-weighted norm, or
-effective gradient norm along τ) is a natural follow-up.
+**对本文自身对照组的后果：** 每一个 norm-matched 对比 —— 包括第 2 部分的 `*_normmatched` 变体和子集实验 —— 都在均衡一个与功能强度只有松散耦合的量。那里的结论之所以成立，是因为*对比*的幅度大且一致，但这个警示必须写明。一个更好的强度度量（Fisher 加权范数，或沿 τ 的有效梯度范数）是自然的后续工作。
 
-This also explains why `proj_parallel` reaches 96.5% of the merge's score on 46%
-of the norm.
+这同时也解释了为什么 `proj_parallel` 只用 46% 的范数就达到了合并模型 96.5% 的分数。
 
 ---
 
-## What to run next
+## 接下来要跑什么
 
-| # | experiment | tests | status / cost |
+| # | 实验 | 检验什么 | 状态 / 开销 |
 |---|---|---|---|
-| **E7** | **difficulty-stratified diagnosis (4 arms, parallel)** | **starvation vs difficulty freeze are separately fixable** | **next — 4×8 node** |
-| E1 | batch-size scaling | dilution vs interference | B running; B′ and C outstanding |
-| E2 | dilution curve, 5 mixture ratios | threshold vs linear slowdown | 5 short runs |
-| E5 | healthy joint-RL baseline (resume 275 + grad clip) | usable baseline | 1 run |
-| E6 | second scale, or a no-group-normalization variant | generality | 1–2 runs |
-| E8 | pairwise domain ablation at fixed IF group count | residual interference, and whether it tracks τ orthogonality | 4 runs |
+| **E7** | **难度分层诊断（4 个分支，并行）** | **饥饿与难度冻结可被分别修复** | **下一个 —— 4×8 节点** |
+| E1 | batch size 放大 | 稀释 vs 干扰 | B 运行中；B′ 和 C 待跑 |
+| E2 | 稀释曲线，5 个混合比例 | 阈值 vs 线性减速 | 5 次短跑 |
+| E5 | 健康的联合 RL 基线（从 275 续跑 + 梯度裁剪） | 可用的基线 | 1 次 |
+| E6 | 第二个模型规模，或去掉 group 归一化的变体 | 泛化性 | 1–2 次 |
+| E8 | 固定 IF group 数下的成对域消融 | 残余干扰，以及它是否跟随 τ 的正交性 | 4 次 |
 
-E1's partial recovery (0.51–0.66× against a 0.82× prediction) plus Code's freeze
-make **E7 the highest-value next experiment**: it is the only design that tests
-the 2×2 diagnosis directly, and it fits a 4-node machine exactly.
+E1 的部分恢复（0.51–0.66×，而预测是 0.82×）加上 Code 的冻结，使 **E7 成为价值最高的下一个实验**：它是唯一直接检验该 2×2 诊断的设计，而且刚好适配一台 4 节点的机器。
 
-#### E7: difficulty-stratified diagnosis (4×8 node, parallel)
+#### E7：难度分层诊断（4×8 节点，并行）
 
-Fix everything except the intervention; measure **dWrong/dt** and **dRight/dt**
-per domain. Reference rates: expert_if −0.159 (healthy), Science −0.007/+0.054
-(healthy), Code −0.001 (frozen).
+固定除干预以外的一切；逐域测量 **dWrong/dt** 与 **dRight/dt**。参考速率：expert_if −0.159（健康），Science −0.007/+0.054（健康），Code −0.001（冻结）。
 
-| arm | intervention | prediction if the 2×2 holds |
+| 分支 | 干预 | 若 2×2 成立则预测 |
 |---|---|---|
-| 1 | Code restricted to prompts with pass rate ∈ (0,1) | Code unfreezes; IF unchanged |
-| 2 | IF upsampled 2.5× (Code untouched) | IF recovers; Code still frozen |
-| 3 | both interventions | both recover — the two fixes are independent |
-| 4 | Code downsampled to 10% of its prompts | other domains improve on freed compute |
+| 1 | Code 限制为通过率 ∈ (0,1) 的 prompt | Code 解冻；IF 不变 |
+| 2 | IF 上采样 2.5×（Code 不动） | IF 恢复；Code 仍冻结 |
+| 3 | 两个干预同时施加 | 两者都恢复 —— 两个修复彼此独立 |
+| 4 | Code 下采样到其 prompt 的 10% | 其他域在释放出的算力上变好 |
 
-Arm 4 is the most interesting for practice: if removing a too-hard domain
-*improves the others*, then in multi-domain RLVR an over-difficult domain does
-not merely fail to learn — **it crowds out the domains that could**. That is a
-directly actionable prescription, and it is not something the dilution story
-alone predicts.
+分支 4 在实践上最有趣：如果移除一个过难的域反而*改善*了其他域，那么在多域 RLVR 中，一个过难的域不只是自己学不会 —— **它还会挤掉那些本来学得会的域**。这是一条可直接执行的处方，而且这不是单靠稀释故事能预测出来的。
 
-Arm 1 vs 2 is the crux: the 2×2 predicts each intervention fixes exactly one
-domain. If arm 2 also unfreezes Code, difficulty and starvation are not
-separable after all and the diagnosis collapses back to one factor.
+分支 1 对分支 2 是关键：2×2 预测每个干预只修复恰好一个域。如果分支 2 也解冻了 Code，那么难度与饥饿终究不可分离，该诊断就退回到单因子。
 
-E2 resolves the threshold-vs-slowdown question. E5 is required because the
-current joint-RL run diverged. E8 was the previous top priority; it is now
-superseded by E7, since the residual interference gap it targets is smaller than
-the effect E7 measures.
+E2 解决阈值 vs 减速的问题。E5 是必需的，因为当前的联合 RL 运行发散了。E8 曾是最高优先级，现在被 E7 取代，因为它所针对的残余干扰缺口小于 E7 所测量的效应。
 
-Known weaknesses to address: single model scale (4B), single RL algorithm, and
-public benchmarks used for both hypothesis selection and reporting — see the
-development-data caveat in `../results/current_findings.md`.
+已知待解决的弱点：单一模型规模（4B）、单一 RL 算法，以及公开基准同时被用于假设选择和结果报告 —— 参见 `../results/current_findings.md` 中关于开发数据的警示。
 
-## Provenance
+## 来源
 
-Measurements: [../results/20260920_session_summary.md](../results/20260920_session_summary.md).
-Tooling: `research/parse_train_log.py` (console log → metric series),
-`research/group_stats.py` (per-domain GRPO group statistics),
-`research/variance_trajectory.py` (per-domain group-composition dynamics),
-`research/task_vector_geom.py` (norms and pairwise cosines),
-`research/experiments/project_task_vector.py`.
-Experiment README: `../experiments/20260920_mopd_extrapolation/README.md`.
+测量数据：[../results/20260920_session_summary.md](../results/20260920_session_summary.md)。
+工具：`research/parse_train_log.py`（console 日志 → 指标序列）、
+`research/group_stats.py`（逐域 GRPO group 统计）、
+`research/variance_trajectory.py`（逐域 group 构成动态）、
+`research/task_vector_geom.py`（范数与两两余弦）、
+`research/experiments/project_task_vector.py`。
+实验 README：`../experiments/20260920_mopd_extrapolation/README.md`。
 
-**Domain labelling.** Only IF carries an explicit `rm_type` in the rollout
-dumps; the rest are identified by ground-truth shape — Code by stdin/stdout test
-vectors, Agent by an expected tool-call list, Science by a single answer letter,
-Math by a bare expression. Agent must be checked before Math: a tool-call list
-is also "not a letter" and an earlier version of this analysis misfiled all
-Agent rollouts as Math, which inflated Math's apparent size and score. The
-corrected labels reproduce the known mixture (Code 24.2 / Math 23.4 / Science
-19.5 / IF 18.0 / Agent 14.8 against Math 25.1 / Science 22.4 / Code 21.9 / IF
-18.9 / Agent 11.7 by prompt count).
+**域标注。** rollout dump 中只有 IF 带有显式的 `rm_type`；其余各域靠 ground-truth 的形状识别 —— Code 靠 stdin/stdout 测试向量，Agent 靠一个期望的工具调用列表，Science 靠单个答案字母，Math 靠裸表达式。Agent 必须在 Math **之前**检查：工具调用列表同样「不是字母」，而本分析的一个早期版本把所有 Agent rollout 误归为 Math，从而虚增了 Math 的表面规模和分数。修正后的标签复现了已知的混合比例（按有效 group 计：Code 24.2 / Math 23.4 / Science 19.5 / IF 18.0 / Agent 14.8；按 prompt 计数则是 Math 25.1 / Science 22.4 / Code 21.9 / IF 18.9 / Agent 11.7）。

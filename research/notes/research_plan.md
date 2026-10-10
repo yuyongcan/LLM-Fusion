@@ -1,137 +1,74 @@
-# Method Development Plan
+# 方法开发计划
 
-Updated: 2026-09-17. These are prospective criteria, not claims that existing
-experiments were designed to meet them.
+更新于 2026-09-17。这些是**前瞻性的**标准，而不是声称既有实验就是照它们设计的。
 
-## Deliverable
+## 交付物
 
-Implement a better static merge of Math, Science, Code, IF, and Agent RLVR
-experts on Qwen3-4B. Deliver a runnable coefficient/component selection
-procedure, one exported checkpoint, a manifest sufficient to rebuild it, and
-controlled evidence of improvement. No extra inference-time expert routing or
-ensemble is needed. Qwen3-8B remains paused until its thinking-mode issue is
-resolved.
+在 Qwen3-4B 上实现一个更优的 Math、Science、Code、IF、Agent RLVR 专家静态合并。交付一个可运行的系数/分量选择流程、一个导出的 checkpoint、一份足以重建它的 manifest，以及受控的改进证据。不需要额外的推理时专家路由或集成。Qwen3-8B 在其 thinking-mode 问题解决之前保持暂停。
 
-Success is an empirical improvement, not the existence of a geometry
-correlation, shared/private decomposition, or positive interaction estimate.
-If scalar calibration works best, ship it and describe the contribution
-honestly. A novel structured component must beat that calibrated scalar
-control under the same selection budget.
+成功标准是**实证上的改进**，而不是「存在一个几何相关性」「存在共享/私有分解」或「交互估计为正」。如果标量校准效果最好，就交付它并诚实地描述贡献。一个新颖的结构化分量必须在相同的选择预算下胜过那个经过校准的标量对照组。
 
-## Prospective acceptance rules
+## 前瞻性验收规则
 
-Freeze these rules and dataset identities before evaluating a finalist:
+在评测决赛候选之前，先把这些规则和数据集身份冻结下来：
 
-| Dimension | Rule |
+| 维度 | 规则 |
 |---|---|
-| Public comparability | Target >= +1.0 AVG8 point over the strongest eligible baseline; report every benchmark. This remains a development result. |
-| Independent confirmation | Positive five-domain macro gain with a paired prompt-bootstrap 95% lower bound above zero on newly reserved prompts. |
-| Domain retention | No domain point estimate below the reference by >1.0 pp; require simultaneous one-sided lower bounds >= -1.0 pp to claim retention. |
-| Generation budget | Same decoding limits/settings; equal-domain mean generated tokens <=105% of reference, length-cap-hit rate <= reference +0.5 pp. Also disclose per-domain lengths and tool calls. |
-| Repetition | At least two explicitly recorded decoding seeds with n>=16 for finalists, subject to a prospective prompt-count/power assessment. |
-| Deployment | One static checkpoint; fp32 merge arithmetic, common bf16 export, measured update norm after export. |
+| 公开可比性 | 目标为相对最强合格基线 ≥ +1.0 个 AVG8 点；报告每一个基准。这仍然是开发集上的结果。 |
+| 独立确认 | 在新预留的 prompt 上，五域宏平均增益为正，且配对 prompt-bootstrap 的 95% 下界大于零。 |
+| 域保留 | 没有任何域的点估计比参考低 >1.0 pp；要声称保留，需同时满足单侧下界 ≥ −1.0 pp。 |
+| 生成预算 | 相同的解码上限/设置；等域平均生成 token ≤ 参考的 105%，长度触顶率 ≤ 参考 +0.5 pp。还要披露逐域长度与工具调用次数。 |
+| 重复性 | 决赛候选至少两个显式记录的解码种子，n≥16，并事先做 prompt 数量/功效评估。 |
+| 部署形态 | 单个静态 checkpoint；fp32 合并运算，统一导出为 bf16，并测量导出后的 update norm。 |
 
-For retention, one conservative option is a one-sided 99% bound for each of
-five domains (Bonferroni family-wise 95%). A small pilot cannot establish this
-automatically. If uncertainty is too large, report inconclusive and size the
-confirmation sample before viewing its results. The +1.0 pp target is an
-engineering milestone, not an estimate of the effect already achieved.
+对于保留性，一个保守的选择是对五个域各用单侧 99% 界（Bonferroni 族系 95%）。小规模试点无法自动确立这一点。若不确定性过大，就报告「结论不确定」，并在查看结果之前先确定确认集样本量。+1.0 pp 的目标是一个工程里程碑，**不是**对已达成效应的估计。
 
-The reference is selected on calibration validation and frozen alongside the
-candidate. Always report fixed TA lambda=1 and the paper's lambda=0.6 as
-anchors. Eligible stronger references include calibration-selected uniform TA
-and RAM+/ResMerge with calibrated global scale. For structured candidates,
-include the best calibrated five-scalar method as an additional reference.
-Match the number of candidate evaluations and selection prompts for
-methods that tune parameters; report merge/calibration GPU-hours separately
-from inference cost.
+参考点在校准验证集上选出，并与候选一起冻结。始终报告固定 TA lambda=1 与论文的 lambda=0.6 作为锚点。合格的更强参考还包括校准选出的统一 TA，以及带校准全局缩放的 RAM+/ResMerge。对于结构化候选，还要把最优的校准五标量方法作为额外参考。对于需要调参的方法，要匹配候选评测次数与选择 prompt 数；合并/校准的 GPU 小时要与推理开销分开报告。
 
-AVG8 gives equal weight to eight benchmarks; the five-domain macro gives equal
-weight to Math, Science, Code, IF, and Agent, averaging a domain's benchmarks
-first. The reasoning AVG5 screen excludes IF and Agent and cannot establish
-multi-domain retention. Calibration rewards, especially fractional Code
-rewards and Agent rewards near saturation, are not interchangeable with public
-benchmark accuracies.
+AVG8 对八个基准等权；五域宏平均对 Math、Science、Code、IF、Agent 等权，先对域内基准取平均。推理 AVG5 筛选项排除了 IF 与 Agent，**不能**用来确立多域保留性。校准 reward —— 尤其是 Code 的分数型 reward 和接近饱和的 Agent reward —— 与公开基准准确率不可互换。
 
-## Data roles
+## 数据角色
 
-1. Existing public benchmarks: development diagnostics and paper comparison.
-   They have already influenced lambda choice, module hypotheses, and the
-   choice of factorial benchmarks. Fresh decoding seeds on them do not create
-   an untouched test set.
-2. Existing 128-row/domain calibration manifest: pilot data, possibly seen by
-   experts during training. All rows have already been evaluated. Cross-fold
-   analysis estimates pilot stability, not clean generalization.
-3. New calibration validation prompts: reserve before fitting/selecting new
-   candidates. Prefer independent prompts with executable/rule verifiers, or
-   a verifiable pre-expert-training holdout. Check overlap by normalized
-   content, not just source row IDs; store provenance and hashes.
-4. New final confirmation prompts: disjoint from expert training, calibration,
-   validation, and previous method selection. Freeze the method before using
-   them. If these prompts are unavailable, label the result exploratory.
+1. **现有公开基准**：开发诊断与论文对比。它们已经影响过 lambda 的选择、模块假设以及析因基准的选取。在其上换新的解码种子，并不能造出一个未被触碰过的测试集。
+2. **现有的 128 行/域校准 manifest**：试点数据，专家在训练时**可能见过**。所有行都已被评测过。交叉折分析估计的是试点的稳定性，不是干净的泛化性。
+3. **新的校准验证 prompt**：在拟合/选择新候选**之前**预留。优先选用带有可执行/规则型验证器的独立 prompt，或一个可验证的、专家训练前的留出集。按归一化内容（而非仅按来源行 ID）检查重叠；保存来源与哈希。
+4. **新的最终确认 prompt**：与专家训练、校准、验证以及此前的方法选择**互不相交**。在使用它们之前冻结方法。若无法获得这类 prompt，就把结果标注为探索性的。
 
-## Candidate family
+## 候选方法族
 
-Let `tau_i = theta_i - theta_0`. Begin with:
+令 `tau_i = theta_i - theta_0`。从下面这个形式起步：
 
-`theta(a) = theta_0 + sum_i a_i tau_i`, with `a_i` initially in `[0.8, 1.2]`.
+`theta(a) = theta_0 + sum_i a_i tau_i`，其中 `a_i` 初始取 `[0.8, 1.2]`。
 
-TA is recovered exactly at `a_i=1` before the common export operation. The
-verifier reward is nonlinear in `a` even though the parameter merge is linear.
-A quadratic response surface can capture coefficient interactions without
-inventing a pairwise parameter vector.
+在共同的导出操作之前，`a_i=1` 恰好还原为 TA。尽管参数合并是线性的，**验证器 reward 对 `a` 是非线性的**。二次响应曲面可以刻画系数间的交互，而无需凭空造一个成对的参量向量。
 
-Only after this control works, consider
+只有在这个对照组跑通之后，才考虑
 
-`theta(a, b) = theta_0 + sum_i a_i tau_i + sum_(i,g) b_(i,g) M_g tau_i`.
+`theta(a, b) = theta_0 + sum_i a_i tau_i + sum_(i,g) b_(i,g) M_g tau_i`。
 
-`M_g` is an explicit module mask; existing `merge_group_coefficients.py`
-implements this by passing coefficient `a_i + b_(i,g)` for the selected group.
-At `b=0` the scalar merge is recovered. Limit initial residuals to one or two
-groups. Existing embedding specificity is a hypothesis source, not evidence
-that increasing the embedding coefficient improves IF.
+`M_g` 是显式的模块 mask；现有的 `merge_group_coefficients.py` 通过对选定组传入系数 `a_i + b_(i,g)` 来实现这一点。`b=0` 时还原为标量合并。初始残差最多限制在一到两个组。现有的 embedding 特异性是假设的来源，**不是**「提高 embedding 系数能改善 IF」的证据。
 
-Optimize average verifier reward subject to retention and budget constraints,
-with regularization toward the TA anchor. Use per-domain constraints to avoid
-trading away a domain for a small mean gain. Start with main effects and
-diagonal curvature; retain cross terms only when held-out candidate settings
-improve predictive accuracy. Confirm any surrogate optimum with an actual
-merge/evaluation; never report surrogate predictions as measured scores.
+在保留约束与预算约束下优化平均验证器 reward，并对 TA 锚点做正则化。使用逐域约束，以避免为了微小的均值增益而牺牲掉某个域。从主效应与对角曲率起步；只有当留出的候选设置确实提升了预测精度时才保留交叉项。任何代理最优解都要用真实的合并/评测来确认；**绝不**把代理模型的预测当作实测分数来报告。
 
-## Execution stages
+## 执行阶段
 
-| Stage | Concrete output | Advance condition |
+| 阶段 | 具体产出 | 推进条件 |
 |---|---|---|
-| 0: reconcile evidence | Recomputed tables, uncertainty, source hashes, current findings | Completed in this revision; no improved method established. |
-| 1: coefficient measurements | TA anchor plus ten one-expert +/-0.2 changes; four prespecified mixed settings for prediction checks | Per-domain verifier metrics, lengths, prompt IDs, seeds, and saved checkpoint norms are complete. |
-| 2: scalar optimizer | Regularized local fit, constrained selector, actual evaluation of its selected checkpoint | Beats calibration-selected uniform TA on reserved validation within budget; otherwise retain TA and diagnose the failed constraint. |
-| 3: optional structure | At most two module residuals using the existing merger | Beats the scalar control at equal calibration budget; verify IF/Agent directly. |
-| 4: freeze and confirm | Locked formula/config/checkpoint plus independent confirmation | Meets the prospective acceptance rules; otherwise report a failed or inconclusive candidate. |
+| 0：核对证据 | 重算的表格、不确定性、来源哈希、当前发现 | 本轮修订中已完成；尚未确立更优的方法。 |
+| 1：系数测量 | TA 锚点 + 十个单专家 ±0.2 变动；四个预先指定的混合设置用于预测检验 | 逐域验证器指标、长度、prompt ID、种子与已保存 checkpoint 范数齐备。 |
+| 2：标量优化器 | 带正则化的局部拟合、带约束的选择器、对其选出的 checkpoint 做真实评测 | 在预算内、于预留验证集上胜过校准选出的统一 TA；否则保留 TA 并诊断失败的约束。 |
+| 3：可选结构化 | 用现有合并器加最多两个模块残差 | 在同等校准预算下胜过标量对照组；直接验证 IF/Agent。 |
+| 4：冻结与确认 | 锁定的公式/配置/checkpoint 加独立确认 | 满足前瞻性验收规则；否则报告一个失败或结论不确定的候选。 |
 
-The Stage 1 candidate list is in
-`../experiments/calibration/next_design.json`. It is prepared, not executed.
-The three completed uniform settings lie on a single line in five-dimensional
-coefficient space. They identify neither five expert effects nor pairwise
-interactions. Eleven axial settings identify intercept, five main effects,
-and five diagonal curvatures but saturate that fit; use regularization and the
-four held-out settings to check predictions. They do not identify a full
-21-parameter quadratic. A full quadratic requires a separately frozen,
-full-rank design with more than 21 settings and out-of-design validation.
+阶段 1 的候选清单位于
+`../experiments/calibration/next_design.json`。它已准备好但**尚未执行**。
+已完成的三个统一设置落在五维系数空间中的**一条直线**上。它们既无法识别五个专家效应，也无法识别成对交互。十一个轴向设置可以识别截距、五个主效应和五个对角曲率，但恰好把该拟合用满；要用正则化和四个留出设置来检验预测。它们**不能**识别完整的 21 参数二次型。完整的二次型需要一个另行冻结的、满秩的设计，设置数多于 21 个，并做设计外验证。
 
-Implement the scalar optimizer only after these measurements exist; the
-current repository has merge/evaluation primitives, not a validated optimizer.
-Before GPU scheduling, verify current cluster processes and resources rather
-than trusting historical PID records.
+只有在这些测量完成之后才实现标量优化器；当前仓库只有合并/评测的原语，没有经过验证的优化器。
+在排 GPU 任务之前，请先核实集群当前的进程与资源，而不要相信历史的 PID 记录。
 
-## Bounded mechanism work
+## 有界的机制研究
 
-Repeat functional geometry on disjoint prompt batches and compare raw weight
-cosine, functional cosine, and simple update norms using held-out domains or
-expert pairs. Proceed to functional subspaces only if this changes which
-component to evaluate and survives stability checks. Current global functional
-correlation superiority disappears in some leave-expert-out checks.
+在不相交的 prompt 批次上重复功能几何分析，并用留出域或专家对来比较原始权重余弦、功能余弦和简单的 update norm。只有当这会改变「该评测哪个分量」的结论、并且能通过稳定性检验时，才推进到功能子空间。当前全局功能相关性的优势在部分 leave-expert-out 检验中会消失。
 
-Do not resume the current Soft-Overlap rule without a concrete change and a
-new falsifiable prediction. Do not infer a useful interaction vector from the
-inconclusive IF x Agent factorial contrast. Do not require a novelty story
-before implementing and measuring the simplest useful merge.
+没有具体的改动和新的可证伪预测，就不要重启当前的 Soft-Overlap 规则。不要从结论不确定的 IF × Agent 析因对比中推断出一个有用的交互向量。在实现并测量最简单的有用合并之前，不要先要求一个新颖性的故事。

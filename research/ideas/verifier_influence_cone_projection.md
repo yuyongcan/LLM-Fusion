@@ -1,67 +1,47 @@
-# Verifier Influence Cone Projection (VICP)
+# Verifier Influence Cone Projection（VICP，验证器影响锥投影）
 
-Status: active hypothesis; not yet validated. The scalar axial experiment is a
-diagnostic/control, not the paper contribution.
+状态：活跃假设；尚未验证。标量轴向实验是诊断/对照手段，**不是**论文贡献点。
 
-## Claim to test
+## 待检验的主张
 
-RLVR experts are not interchangeable task vectors. A signed perturbation of one
-expert can improve one verifier while harming another, and the effect is only
-partly visible in parameter geometry. We therefore estimate a **verifier
-influence vector** for each merge component and retain only directions whose
-uncertainty-adjusted influence lies in a robust multi-domain improvement cone.
+RLVR 专家之间不是可互换的 task vector。对某一个专家做带符号的扰动，可能改善一个验证器却伤害另一个，而这种效应在参数几何中只能部分地看出来。因此，我们为每个合并分量估计一个**验证器影响向量**，只保留那些「经不确定性调整后落在鲁棒多域改进锥内」的方向。
 
-For base parameters `theta_0`, component updates `u_j` and coefficients `a`,
+对于 base 参数 `theta_0`、各分量更新 `u_j` 与系数 `a`，
 
-`theta(a) = theta_0 + sum_j a_j u_j`.
+`theta(a) = theta_0 + sum_j a_j u_j`。
 
-At the TA anchor `a=1`, evaluate signed perturbations `a +/- h e_j` on the
-same prompts. For domain `d`, the first-order influence is
+在 TA 锚点 `a=1` 处，在**同一批** prompt 上评估带符号扰动 `a +/- h e_j`。对域 `d`，其一阶影响为
 
-`G[d,j] = (R_d(1+h e_j) - R_d(1-h e_j)) / (2h)`.
+`G[d,j] = (R_d(1+h e_j) - R_d(1-h e_j)) / (2h)`。
 
-The measured object is a vector over native verifiers, not a weight cosine or
-an unlabeled entropy proxy. Bootstrap intervals are computed on prompt clusters
-so duplicate inputs cannot create fake precision. Generation length and cap-hit
-rate are additional influence coordinates with a budget constraint.
+所测量的对象是原生验证器上的一个向量，而不是权重余弦或无标签的熵代理量。Bootstrap 区间在 prompt 聚类上计算，因此重复输入无法伪造精度。生成长度与触顶率是额外的影响坐标，并带有预算约束。
 
-## Robust cone projection
+## 鲁棒锥投影
 
-Let `L[d,j]` be a lower confidence bound for `G[d,j]`, and `q[j]` the signed
-cost influence. We solve a small linear robust projection around the anchor:
+令 `L[d,j]` 为 `G[d,j]` 的置信下界，`q[j]` 为带符号的开销影响。我们在锚点附近求解一个小的线性鲁棒投影：
 
 `max_delta,t  t - lambda ||delta||_2^2`
 
-subject to
+满足约束：
 
-`L[d,:] delta - lambda_cost q delta >= t` for every domain `d`,
-`q delta <= budget`, `-rho <= delta_j <= rho`, and `sum(delta_j^2) <= rho^2`.
+- 对每个域 `d`，`L[d,:] delta - lambda_cost q delta >= t`；
+- `q delta <= budget`；
+- `-rho <= delta_j <= rho`；
+- `sum(delta_j^2) <= rho^2`。
 
-The checkpoint is exported once after this projection. The cone is not allowed
-to trade an uncertain gain in one domain for a point estimate loss in another.
-The selected direction must predict prespecified mixed settings that were not
-used to estimate `G`; poor held-out prediction falsifies the mechanism.
+checkpoint 在该投影之后**只导出一次**。不允许用某个域上不确定的增益去换另一个域上点估计的损失。被选中的方向必须能预测**预先指定**的、未参与估计 `G` 的混合组合；留出预测表现差即证伪该机制。
 
-## Required distinction from coefficient tuning
+## 与系数调优必须做出的区分
 
-Five scalar coefficients are a control because they use the same additive
-parameterization as Task Arithmetic. VICP earns a distinct contribution only if
-all of the following hold:
+五个标量系数之所以只是对照组，是因为它们与 Task Arithmetic 使用同样的加性参数化。VICP 只有在以下**全部**条件成立时才能获得独立的贡献：
 
-1. influence vectors predict held-out mixed perturbations better than a scalar
-   response model with no verifier structure;
-2. the confidence-cone projection improves the weakest domain at matched budget;
-3. the gain survives a frozen confirmation set and decoding repetition; and
-4. removing signed verifier influence, uncertainty bounds, or the worst-domain
-   constraint removes the gain.
+1. 影响向量对留出的混合扰动的预测，优于不含验证器结构的标量响应模型；
+2. 置信锥投影在同等预算下改善了最弱的域；
+3. 该增益在冻结的确认集和重复解码下依然成立；
+4. 去掉带符号的验证器影响、不确定性界或最差域约束中的任何一项，增益就消失。
 
-If these tests fail, report the method as a constrained calibration baseline and
-do not claim a new merge algorithm.
+若这些检验失败，就把该方法当作一个带约束的校准基线来报告，**不要**声称它是一个新的合并算法。
 
-## Component progression
+## 分量推进顺序
 
-The first experiment uses five expert updates because it is cheap and tests
-whether verifier influence is useful at all. Only after successful held-out
-prediction may the basis expand to expert x module groups or a geometry-
-nominated low-rank basis. Expanding the basis before that test would be a
-high-dimensional coefficient search and would not support the proposed claim.
+第一个实验使用五个专家更新，因为它便宜，并且能检验「验证器影响到底有没有用」。只有在留出预测成功之后，才可以把基扩展为「专家 × 模块组」，或扩展为几何提名出的低秩基。在那项检验之前就扩展基，等于做一次高维系数搜索，无法支撑所提出的主张。

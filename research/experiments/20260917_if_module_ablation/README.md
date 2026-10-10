@@ -1,26 +1,16 @@
-# IF Module-Group Ablation
+# IF 模块组消融
 
-All models start from five-expert Task Arithmetic with coefficient `1.0`.
-Exactly one module group receives an additional `0.2 * tau_IF`:
+所有模型都从系数为 `1.0` 的五专家 Task Arithmetic 出发。
+恰有一个模块组被额外加上 `0.2 * tau_IF`：
 
 - `if_embedding_1.2`
 - `if_attention_1.2`
 - `if_mlp_1.2`
 
-Compare against the existing TA `lambda=1` model and the existing global
-per-expert endpoint with IF coefficient `1.2`. The experiment tests whether the
-IF gain can be localized to a task-specific module group rather than requiring
-a global expert scalar.
+与既有的 TA `lambda=1` 模型、以及既有的 IF 系数为 `1.2` 的全局逐专家端点做对比。本实验检验的是：IF 的增益能否被定位到一个任务特定的模块组上，而不需要一个全局的专家标量。
 
-## Recorded outcome
+## 已记录的结果
 
-Only `if_embedding_1.2` has saved evaluation results here. Its reasoning AVG5
-at n=4 is 63.09, versus TA's 64.50; the paired difference is -1.42 pp with
-95% CI [-4.08, +1.08]. No IF or Agent evaluation is present, so this screen
-does not answer whether the correction improves IF or preserves Agent. No
-attention/MLP evaluation is recorded here.
+此处只有 `if_embedding_1.2` 保存了评测结果。它在 n=4 下的推理 AVG5 为 63.09，而 TA 是 64.50；配对差为 −1.42 pp，95% CI [−4.08, +1.08]。**没有任何** IF 或 Agent 的评测数据，因此该筛选回答不了「这个校正是否改善 IF、是否保住了 Agent」。此处也没有记录 attention/MLP 的评测。
 
-Treat this as an incomplete exploratory ablation. The embedding group in the
-merger includes `embed_tokens` and `lm_head` when present. Direct all-domain
-evaluation and comparison to calibrated expert scalars are required before
-selecting any module correction.
+请把它当作一个不完整的探索性消融。合并器中的 embedding 组包含 `embed_tokens` 以及（若存在的）`lm_head`。在选择任何模块级校正之前，必须先做全域评测，并与经过校准的专家标量做对比。

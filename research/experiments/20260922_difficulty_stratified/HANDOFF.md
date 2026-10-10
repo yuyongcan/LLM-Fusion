@@ -1,176 +1,117 @@
-# E7 — Difficulty-Stratified Diagnosis of Joint Multi-Domain RL
+# E7 —— 联合多域 RL 的难度分层诊断
 
-Handoff for the agent operating the 4-node (4×8 GPU) machine. Written 2026-09-22.
+给操作这台 4 节点（4×8 GPU）机器的 agent 的交接文档。写于 2026-09-22。
 
-You are running **four GRPO training arms in parallel, one per node.** Each arm
-is a five-domain joint-RL run that differs from the others only in how the
-training mixture is filtered or resampled. The goal is not a better model — it
-is to determine *why* two of the five domains fail to learn, and whether the two
-failures have independent causes.
+你要**并行跑四个 GRPO 训练分支，每个节点一个**。每个分支都是一次五域联合 RL 运行，彼此之间**只有**训练混合数据被过滤或重采样的方式不同。目标不是训出更好的模型 —— 而是要确定五个域中有两个学不动的**原因**，以及这两种失败是否有各自独立的成因。
 
-Read [Background](#background) before touching anything: the whole experiment
-turns on one specific metric, and the obvious metric is misleading.
+在动手之前请先读[背景](#背景)：整个实验都系于一个特定的指标，而那个最显而易见的指标是具有误导性的。
 
 ---
 
-## Background
+## 背景
 
-A five-domain joint-RL run (`train_mix_8x8_20260919_162504`, Qwen3-4B, GRPO,
-bs=128) was analysed per domain over steps 1–270. Rates are per step; the
-reference is a single-domain IF expert run, which reached dWrong/dt = −0.159.
+一次五域联合 RL 运行（`train_mix_8x8_20260919_162504`，Qwen3-4B，GRPO，bs=128）在 step 1–270 上做了逐域分析。速率按每步计；参考对象是单域的 IF 专家运行，它达到了 dWrong/dt = −0.159。
 
-| domain | prompt share | eff. groups/step | dWrong/dt | vs expert | group std | verdict |
+| domain | prompt share | eff. groups/step | dWrong/dt | vs expert | group std | 判定 |
 |---|---:|---:|---:|---:|---|---|
-| Science | 19.5% | 15.8 | −0.0067 | 0.04× | 0.216 → **0.182** | healthy |
-| Agent | 14.8% | — | — | — | 0.500 → **0.426** | healthy |
-| Math | 23.4% | 19.5 | +0.0078 | −0.05× | 0.243 → 0.233 | **saturated** |
-| IF | 18.0% | 7.7 | −0.0267 | 0.17× | 0.120 → 0.124 | **starved** |
-| **Code** | **24.2%** | 10.4 | **−0.0011** | **0.01×** | 0.085 → 0.083 | **frozen** |
+| Science | 19.5% | 15.8 | −0.0067 | 0.04× | 0.216 → **0.182** | 健康 |
+| Agent | 14.8% | — | — | — | 0.500 → **0.426** | 健康 |
+| Math | 23.4% | 19.5 | +0.0078 | −0.05× | 0.243 → 0.233 | **饱和** |
+| IF | 18.0% | 7.7 | −0.0267 | 0.17× | 0.120 → 0.124 | **饥饿** |
+| **Code** | **24.2%** | 10.4 | **−0.0011** | **0.01×** | 0.085 → 0.083 | **冻结** |
 
-Two distinct pathologies, which we believe have different causes and different
-fixes:
+两种不同的病理，我们认为它们有不同的成因和不同的修法：
 
-- **IF is starved.** It is the sparsest-reward domain: 68% of its GRPO groups
-  have zero reward variance, so they yield zero advantage and no gradient. At
-  18% of prompts it ends up with only ~15% of gradient-carrying groups. A
-  separate run at bs=512 raised IF's effective groups to 0.82× expert parity and
-  recovered learning to 0.51–0.66× — **partial**, consistent with dilution being
-  the dominant cause.
-- **Code is frozen, and starvation does not explain it.** Code holds the
-  *largest* prompt share (24.2%) and more effective groups per step than IF
-  (10.4 vs 7.7), yet its all-wrong group fraction is immobile across 275 steps
-  (57.6% → 57.4%) and its all-right fraction never exceeds 3%. Gradient supply
-  is adequate and it still does not learn. The hypothesis is that the task is
-  simply beyond the model's current capability, so most prompts are permanently
-  all-wrong. **If true, more batch or more data cannot fix Code.**
+- **IF 是饥饿。** 它是 reward 最稀疏的域：68% 的 GRPO group 的 reward 方差为零，因此产生零 advantage、没有梯度。占 18% 的 prompt，最终只拿到约 15% 携带梯度的 group。一次 bs=512 的独立运行把 IF 的有效 group 提到专家等价水平的 0.82×，并把学习恢复到 0.51–0.66× —— 这是**部分**恢复，与「稀释是主因」一致。
+- **Code 是冻结，而饥饿解释不了它。** Code 握有*最大*的 prompt 份额（24.2%），每步有效 group 也比 IF 多（10.4 对 7.7），然而它的全错 group 占比在 275 步中纹丝不动（57.6% → 57.4%），全对占比从未超过 3%。梯度供给是充足的，而它仍然学不动。假设是：该任务**超出了模型当前的能力**，于是大多数 prompt 永久处于全错状态。**若这个假设成立，那么更多的 batch 或更多的数据都修不了 Code。**
 
-### The hypothesis you are testing
+### 你要检验的假设
 
-| | gradient supply adequate | gradient supply starved |
+| | 梯度供给充足 | 梯度供给饥饿 |
 |---|---|---|
-| **task within capability** | healthy (Science, Agent) | **starvation** (IF) — fix by rebalancing |
-| **task beyond capability** | **difficulty freeze** (Code) — rebalancing is useless | both at once |
+| **任务在能力范围内** | 健康（Science、Agent） | **饥饿**（IF）—— 靠重新配平修复 |
+| **任务超出能力范围** | **难度冻结**（Code）—— 重新配平无用 | 两者同时发生 |
 
-The prediction is that **each failure has its own fix and the fixes do not
-substitute for one another.** Arm 1 should unfreeze Code and leave IF alone;
-arm 2 should recover IF and leave Code frozen. If a single intervention fixes
-both, the two-factor account collapses and we should know that.
+预测是：**每种失败都有各自的修法，且这些修法不能互相替代。** 分支 1 应当解冻 Code 且不惊动 IF；分支 2 应当恢复 IF 而让 Code 保持冻结。如果某一个干预把两个都修好了，那么双因子的解释就崩溃了，而我们需要知道这一点。
 
-### The metric trap — read this carefully
+### 指标陷阱 —— 请仔细阅读
 
-**Do not use mean group reward std as the health signal, and do not use
-`zero_var_frac` on its own.** Both are two-sided:
+**不要用 group reward std 的均值作为健康信号，也不要单独使用 `zero_var_frac`。** 两者都是双向的：
 
-- A domain that has *not started* has low spread and high zero-variance, because
-  its groups are uniformly wrong.
-- A domain that has *finished* also has low spread and high zero-variance,
-  because its groups are uniformly right.
+- 一个*还没起步*的域，离散度低、零方差高，因为它的 group 一致地全错。
+- 一个*已经完成*的域，同样离散度低、零方差高，因为它的 group 一致地全对。
 
-The single-domain IF expert demonstrates this: as it learned well, group std
-*fell* 0.120 → 0.087 → 0.066 and zero-variance *rose* 68% → 81%, because
-all-wrong groups were converting into all-right ones (wrong 42.7% → 18.0%, right
-25.3% → 62.9%). An earlier version of this analysis read the falling variance as
-deterioration; it was the opposite.
+单域的 IF 专家正好演示了这一点：随着它学得很好，group std **下降** 0.120 → 0.087 → 0.066，而零方差**上升** 68% → 81%，因为全错 group 正在转化为全对 group（wrong 42.7% → 18.0%，right 25.3% → 62.9%）。本分析的一个早期版本把方差下降读成了恶化，事实恰恰相反。
 
-**Use the decomposition instead:**
+**请改用这个分解：**
 
-- `all_wrong_frac` ↓ = the domain is unlocking problems it could not solve
-  ("curriculum unlock rate", **dWrong/dt** — the primary signal)
-- `all_right_frac` ↑ = the domain is consolidating solutions (**dRight/dt**)
-- `effective_groups` = groups actually contributing gradient this step
+- `all_wrong_frac` ↓ = 该域正在解锁它原先解不出的问题（「课程解锁速率」，**dWrong/dt** —— 主要信号）
+- `all_right_frac` ↑ = 该域正在巩固解法（**dRight/dt**）
+- `effective_groups` = 这一步实际贡献梯度的 group 数
 
-These are now logged per domain by the trainer (added 2026-09-22, see
-[Metrics](#metrics)), so you do not need to post-process rollout dumps.
+这些现在由 trainer 逐域记录（2026-09-22 加入，见[指标](#指标)），所以你不需要再对 rollout dump 做后处理。
 
 ---
 
-## The four arms
+## 四个分支
 
-All arms: Qwen3-4B-Instruct-2507, GRPO, five domains, **identical
-hyperparameters**. The only difference is the training mixture. One node each,
-run in parallel.
+所有分支：Qwen3-4B-Instruct-2507、GRPO、五个域、**超参完全相同**。唯一的差别是训练混合数据。各占一个节点，并行运行。
 
-| arm | name | intervention | prediction if the 2×2 holds |
+| 分支 | 名称 | 干预 | 若 2×2 成立则预测 |
 |---|---|---|---|
-| 1 | `code_filtered` | keep only Code prompts with pass rate ∈ (0,1) | Code unfreezes; IF unchanged |
-| 2 | `if_upsampled` | duplicate IF prompts 2.5×; Code untouched | IF recovers; Code still frozen |
-| 3 | `both` | arms 1 and 2 together | both recover — fixes are independent |
-| 4 | `code_downsampled` | keep 10% of Code prompts | **other domains improve** on freed compute |
+| 1 | `code_filtered` | 只保留通过率 ∈ (0,1) 的 Code prompt | Code 解冻；IF 不变 |
+| 2 | `if_upsampled` | 把 IF prompt 复制 2.5×；Code 不动 | IF 恢复；Code 仍冻结 |
+| 3 | `both` | 分支 1 与 2 同时施加 | 两者都恢复 —— 两个修复彼此独立 |
+| 4 | `code_downsampled` | 只保留 10% 的 Code prompt | **其他域**在释放出的算力上变好 |
 
-Arm 4 is the one with a practical payoff: if dropping a too-hard domain makes
-the others better, then in multi-domain RLVR an over-difficult domain does not
-merely fail to learn, it **crowds out domains that could**. Plain dilution does
-not predict that.
+分支 4 是那个有实践回报的：如果丢掉一个过难的域能让其他域变好，那么在多域 RLVR 中，一个过难的域不只是自己学不会，它还会**挤掉那些本来学得会的域**。单纯的稀释故事预测不出这一点。
 
-### Step 1 — measure Code's per-prompt pass rate
+### 第 1 步 —— 测量 Code 的逐 prompt 通过率
 
-Arms 1 and 3 need to know which Code prompts are solvable at all. Do **not**
-guess a difficulty proxy from prompt text. Measure it:
+分支 1 和 3 需要知道哪些 Code prompt 是根本可解的。**不要**从 prompt 文本猜测难度代理量。要去测量它：
 
-Use the existing rollout dumps from the completed baseline run at
-`runs/llm_fusion/rollout_data/mix_rl_qwen3_4b_8x8/` (steps 1–382; **use only
-steps ≤ 275**, see [Data hygiene](#data-hygiene)). Each line is one rollout with
-`input`, `score`, `gts`. Group by `input`, compute the mean score per prompt, and
-classify:
+使用已完成的那次基线运行留下的 rollout dump，位于
+`runs/llm_fusion/rollout_data/mix_rl_qwen3_4b_8x8/`（step 1–382；**只使用 step ≤ 275**，见[数据卫生](#数据卫生)）。每行是一条 rollout，含 `input`、`score`、`gts`。按 `input` 分组，计算每个 prompt 的平均 score，并分类：
 
-- `pass_rate == 0` → never solved; these are what arm 1 removes
-- `0 < pass_rate < 1` → learnable signal; arm 1 keeps these
-- `pass_rate == 1` → already solved
+- `pass_rate == 0` → 从未被解出；这些正是分支 1 要移除的
+- `0 < pass_rate < 1` → 可学习的信号；分支 1 保留这些
+- `pass_rate == 1` → 已经解出
 
-`research/group_stats.py` and `research/variance_trajectory.py` already contain
-the domain-labelling logic — **import `domain()` from
-`research/variance_trajectory.py` rather than rewriting it.** Labelling is
-subtle: only IF carries an explicit `rm_type`; Code is identified by
-stdin/stdout test vectors in `gts`, Agent by an expected tool-call list, Science
-by a single answer letter, Math by a bare expression. **Agent must be checked
-before Math** — a tool-call list is also "not a letter" and an earlier analysis
-misfiled every Agent rollout as Math.
+`research/group_stats.py` 和 `research/variance_trajectory.py` 里已经有域标注的逻辑 —— **请从 `research/variance_trajectory.py` 导入 `domain()`，而不是重写它。** 标注是微妙的：只有 IF 带显式的 `rm_type`；Code 靠 `gts` 中的 stdin/stdout 测试向量识别，Agent 靠期望的工具调用列表，Science 靠单个答案字母，Math 靠裸表达式。**Agent 必须在 Math 之前检查** —— 工具调用列表同样「不是字母」，而一个早期分析曾把每一条 Agent rollout 都误归为 Math。
 
-Sanity check your labelling against the known mixture before proceeding:
-Math 25.1% / Science 22.4% / Code 21.9% / IF 18.9% / Agent 11.7% by prompt count.
+在继续之前，用已知的混合比例校验你的标注：按 prompt 计数为 Math 25.1% / Science 22.4% / Code 21.9% / IF 18.9% / Agent 11.7%。
 
-Report how many Code prompts fall in each bucket. If the all-wrong bucket is
-*not* a large majority (we expect ~57%), stop and say so — the premise is wrong.
+报告落入每个桶的 Code prompt 各有多少。如果全错桶**不是**占绝大多数（我们预期约 57%），就停下来说明 —— 说明前提就是错的。
 
-### Step 2 — build the four mixtures
+### 第 2 步 —— 构建四个混合集
 
-Source data: `data/LLM-Fusion/train/Mix/train-*.parquet` (16 shards, 87,699 rows).
-Schema: `data_source`, `prompt`, `ability`, `reward_model`, `extra_info`,
-`agent_name`. Domain is `data_source` (e.g. `LLM-Fusion/Code`) — for *building*
-mixtures use this column directly; the `domain()` heuristic above is only needed
-for rollout dumps, which lack it.
+源数据：`data/LLM-Fusion/train/Mix/train-*.parquet`（16 个分片，87,699 行）。
+Schema：`data_source`、`prompt`、`ability`、`reward_model`、`extra_info`、
+`agent_name`。域就是 `data_source`（例如 `LLM-Fusion/Code`）—— **构建**混合集时直接用这一列；上面那个 `domain()` 启发式只在处理 rollout dump 时才需要，因为 dump 里没有这一列。
 
-Write each arm's mixture to its own directory under
-`data/LLM-Fusion/train/Mix_e7_<arm>/`. **Do not modify `Mix/`** — the baseline
-and the running comparisons depend on it.
+把每个分支的混合集写到 `data/LLM-Fusion/train/Mix_e7_<arm>/` 下各自的目录。**不要修改 `Mix/`** —— 基线和正在跑的对比都依赖它。
 
-Constraints:
+约束条件：
 
-- Preserve every column, including `agent_name` (Agent rows carry
-  `agent_name=tool_agent` and are routed to the multi-turn tool loop; losing it
-  silently breaks Agent).
-- Match Code prompts to their pass-rate bucket by the same key you grouped on in
-  step 1. The dumps store a *rendered* prompt while the parquet stores structured
-  `prompt`; verify your join actually matches before trusting it, and report the
-  match rate. A low match rate means the join is wrong, not that the data is.
-- Arm 2's upsampling is row duplication of `LLM-Fusion/IF` rows only.
-- Keep shard sizes roughly comparable to the original (~5.5k rows/shard).
+- 保留每一列，包括 `agent_name`（Agent 行带 `agent_name=tool_agent`，会被路由到多轮工具循环；丢了它会静默地破坏 Agent）。
+- 用与第 1 步分组时相同的 key，把 Code prompt 匹配到它们的通过率桶。dump 里存的是*渲染后*的 prompt，而 parquet 里存的是结构化的 `prompt`；在信任 join 之前先验证它真的匹配上了，并报告匹配率。匹配率低意味着 join 写错了，而不是数据有问题。
+- 分支 2 的上采样是**仅**对 `LLM-Fusion/IF` 行做行复制。
+- 分片大小与原始保持大致可比（约 5.5k 行/分片）。
 
-Record the resulting per-domain row counts for all four arms in your report.
+在报告里记录四个分支各自的逐域行数。
 
-### Step 3 — launch
+### 第 3 步 —— 启动
 
-Launcher: `examples/llm_fusion/train/train_mix_rl.sh`, driven by
-`TRAIN_FILE`. Look at `run_train_multinode.sh` for how this repo wires up a
-run; it handles the Ray/sandbox/env preflight.
+启动脚本：`examples/llm_fusion/train/train_mix_rl.sh`，由 `TRAIN_FILE` 驱动。
+可参考 `run_train_multinode.sh` 了解本仓库是如何串起一次运行的；它负责 Ray/sandbox/环境的前置检查。
 
-Per-node settings (**one 8-GPU job per node — do not span nodes**):
+每节点设置（**每节点一个 8 卡作业 —— 不要跨节点**）：
 
 ```bash
 export NNODES=1
 export NGPUS_PER_NODE=8
-export TRAIN_BATCH_SIZE=512          # matches the bs512 comparison run
-export ACTOR_LR=2e-6                 # matches it too; see the caveat below
+export TRAIN_BATCH_SIZE=512          # 与 bs512 对比运行一致
+export ACTOR_LR=2e-6                 # 也与它一致；见下面的警示
 export TOTAL_TRAINING_STEPS=250
 export SAVE_FREQ=50
 export TEST_FREQ=25
@@ -179,27 +120,18 @@ export EXPERIMENT_NAME=e7_<arm>_qwen3_4b
 bash examples/llm_fusion/train/train_mix_rl.sh
 ```
 
-Prerequisites per node: the code sandbox must be up on `localhost:8080`
-(`bash setup_sandbox.sh`) or **Code rewards are silently near-zero — which would
-fake the exact result we are testing for.** Verify with the curl probe in
-`run_eval_experts.sh` before launching, and state in your report that you did.
+每节点的前置条件：代码 sandbox 必须在 `localhost:8080` 上就绪（`bash setup_sandbox.sh`），否则 **Code 的 reward 会静默地趋近于零 —— 那会伪造出我们要检验的那个结果本身。** 启动前用 `run_eval_experts.sh` 里的 curl 探活验证，并在报告中说明你做了。
 
-**Add gradient-norm clipping.** The baseline run diverged at step 300 (see
-[Data hygiene](#data-hygiene)). Check what the launcher already sets and make
-sure a finite clip is active.
+**加上梯度范数裁剪。** 基线运行在 step 300 发散了（见[数据卫生](#数据卫生)）。检查启动脚本已经设了什么，并确保有一个有限的裁剪值在生效。
 
-Two caveats to carry into the analysis:
+分析时要带上两条警示：
 
-1. bs=512 with lr=2e-6 changes *both* batch and learning rate relative to the
-   bs=128/1e-6 baseline, so those effects are entangled. All four arms share the
-   setting, so **cross-arm comparisons are clean**; comparisons against the
-   bs=128 baseline are not.
-2. 250 steps at bs=512 is ~4× the samples of 250 steps at bs=128. Compare arms to
-   each other, and to the bs=512 run described below — not to bs=128 step counts.
+1. bs=512 配 lr=2e-6，相对 bs=128/1e-6 的基线**同时**改变了 batch 和学习率，所以这两个效应是纠缠的。四个分支共享该设置，因此**分支之间的对比是干净的**；与 bs=128 基线的对比则不干净。
+2. bs=512 跑 250 步的样本量约为 bs=128 跑 250 步的 4 倍。分支之间互相比，并与下面描述的 bs=512 运行比 —— 而不是与 bs=128 的步数比。
 
-### Step 4 — analyse
+### 第 4 步 —— 分析
 
-Primary signal, per arm, per domain:
+主要信号，逐分支、逐域：
 
 ```bash
 python research/parse_train_log.py <log> \
@@ -207,99 +139,76 @@ python research/parse_train_log.py <log> \
     --every 10
 ```
 
-Fit **dWrong/dt** over a window well clear of the warm-up (e.g. steps 50–250)
-and compare across arms. Reference points: expert_if −0.159 (healthy
-single-domain), Science −0.007 (healthy in-mixture), Code −0.001 (frozen),
-IF −0.027 (starved).
+在一个远离预热区的窗口（例如 step 50–250）上拟合 **dWrong/dt**，并跨分支比较。参考点：expert_if −0.159（健康的单域）、Science −0.007（混合中健康）、Code −0.001（冻结）、IF −0.027（饥饿）。
 
-**Decision rules, fixed now — do not adjust after seeing results.**
+**判定规则，现在就固定 —— 看到结果之后不得调整。**
 
-| observation | conclusion |
+| 观测 | 结论 |
 |---|---|
-| arm 1 lifts Code's dWrong/dt to ≥10× its baseline (−0.001 → ≤−0.01) and leaves IF within noise | difficulty freeze confirmed as a distinct mode |
-| arm 2 lifts IF toward ≥0.8× expert and leaves Code frozen | starvation confirmed as a distinct mode |
-| arm 3 ≈ arm 1's Code effect + arm 2's IF effect | the two fixes are independent — the 2×2 holds |
-| arm 2 *also* unfreezes Code | **2×2 falsified**; one factor, report it plainly |
-| arm 4 improves non-Code domains beyond arm-to-arm noise | over-difficult domains crowd out learnable ones |
-| no arm moves anything | something is misconfigured — check the sandbox first |
+| 分支 1 把 Code 的 dWrong/dt 提到其基线的 ≥10×（−0.001 → ≤−0.01），且 IF 保持在噪声范围内 | 难度冻结被确认为一种独立模式 |
+| 分支 2 把 IF 提到 ≥0.8× 专家水平，且 Code 保持冻结 | 饥饿被确认为一种独立模式 |
+| 分支 3 ≈ 分支 1 的 Code 效应 + 分支 2 的 IF 效应 | 两个修复彼此独立 —— 2×2 成立 |
+| 分支 2 *也*解冻了 Code | **2×2 被证伪**；只有一个因子，请如实报告 |
+| 分支 4 使非 Code 域的改善超出分支间噪声 | 过难的域会挤掉可学的域 |
+| 没有任何分支使任何东西移动 | 某处配置错了 —— 先检查 sandbox |
 
-Also report `val-core/<benchmark>/acc/mean@4` trends per arm, but treat training
-dynamics as primary: 250 steps is unlikely to move benchmarks much, and the
-mechanism lives in the group statistics.
+同时报告逐分支的 `val-core/<benchmark>/acc/mean@4` 趋势，但要把训练动态当作主要依据：250 步不太可能让 benchmark 移动多少，而机制存在于 group 统计之中。
 
 ---
 
-## Metrics
+## 指标
 
-Added to `verl/trainer/ppo/metric_utils.py` on 2026-09-22 (covered by tests in
-`tests/trainer/ppo/test_metric_utils_on_cpu.py`). Per domain, per step:
+2026-09-22 加入到 `verl/trainer/ppo/metric_utils.py`（由 `tests/trainer/ppo/test_metric_utils_on_cpu.py` 中的测试覆盖）。逐域、逐步：
 
-| key under `grpo/group_by_domain/<domain>/` | meaning |
+| `grpo/group_by_domain/<domain>/` 下的键 | 含义 |
 |---|---|
-| `all_wrong_frac` | share of groups uniformly scoring 0 — **primary signal** |
-| `all_right_frac` | share of groups uniformly scoring nonzero |
-| `zero_var_frac` | degenerate groups (= the two above summed) |
-| `reward_std_mean` | mean within-group reward std — advantage magnitude |
-| `num_groups` | groups for this domain this step |
-| `effective_groups` | non-degenerate groups — the gradient actually available |
+| `all_wrong_frac` | 一致得 0 分的 group 占比 —— **主要信号** |
+| `all_right_frac` | 一致得非零分的 group 占比 |
+| `zero_var_frac` | 退化 group（= 上面两者之和） |
+| `reward_std_mean` | group 内 reward std 的均值 —— advantage 的幅度 |
+| `num_groups` | 该域这一步的 group 数 |
+| `effective_groups` | 非退化 group —— 实际可用的梯度 |
 
-`<domain>` is the lowercased tail of `data_source`: `math`, `science`, `code`,
-`if`, `agent`. Note `reward_std_mean` is the **within-group** std averaged over
-groups (this is the quantity GRPO's advantage scales with), not the std over all
-samples in the batch.
+`<domain>` 是 `data_source` 的小写尾部：`math`、`science`、`code`、`if`、`agent`。注意 `reward_std_mean` 是**group 内** std 在 group 上的平均（正是 GRPO 的 advantage 所缩放的量），不是整个 batch 所有样本的 std。
 
-With partial-credit verifiers `all_right_frac` means "uniformly nonzero", not
-"perfect".
+对于部分给分的验证器，`all_right_frac` 的含义是「一致地非零」，而不是「完美」。
 
 ---
 
-## Data hygiene
+## 数据卫生
 
-**The baseline run diverged after step 300.** grad_norm spiked 0.039 → 0.507,
-response length blew up to 15,093 tokens (92% truncated), entropy collapsed to
-0.009, and aime25/aime26/gpqa/ifbench all went to zero. **Use only steps ≤ 275**
-from `mix_rl_qwen3_4b_8x8`; `global_step_275` is the last healthy checkpoint. The
-IF and Code findings are unaffected — both are visible from step 0 — but do not
-fit rates through the collapse.
+**基线运行在 step 300 之后发散了。** grad_norm 从 0.039 飙到 0.507，回答长度膨胀到 15,093 token（92% 被截断），熵塌缩到 0.009，aime25/aime26/gpqa/ifbench 全部归零。**只使用** `mix_rl_qwen3_4b_8x8` 中 step ≤ 275 的数据；`global_step_275` 是最后一个健康的 checkpoint。IF 与 Code 的发现不受影响 —— 两者从 step 0 就可见 —— 但不要把速率拟合穿过崩溃区间。
 
-**The bs=512 comparison run stopped at step 78** (`train_mix_8x8_20260921_164602`,
-log idle since 11:41, no live process). Its numbers (IF recovery 0.51–0.66×) are
-from 78 steps and are noisy. Do not treat them as settled; if you want a firmer
-comparison, that run needs resuming — coordinate before doing so, it is not your
-node.
+**bs=512 的对比运行停在 step 78**（`train_mix_8x8_20260921_164602`，日志自 11:41 起无更新，无存活进程）。它的数字（IF 恢复到 0.51–0.66×）来自 78 步，噪声较大。不要把它们当作已定论；若想有更扎实的对比，那次运行需要续跑 —— 续跑前请先协调，那个节点不是你的。
 
 ---
 
-## Deliverables
+## 交付物
 
-Write results to `research/experiments/20260922_difficulty_stratified/README.md`
-following the format of `../20260920_mopd_extrapolation/README.md` — question,
-method, decision rules stated up front, then results.
+把结果写到 `research/experiments/20260922_difficulty_stratified/README.md`，
+遵循 `../20260920_mopd_extrapolation/README.md` 的格式 —— 先写问题、方法、事先声明的判定规则，再写结果。
 
-Include:
+需包含：
 
-1. Code pass-rate distribution from step 1, and the parquet join match rate.
-2. Per-domain row counts for all four mixtures.
-3. dWrong/dt and dRight/dt per arm per domain, with the fitting window stated.
-4. Which decision-rule row fired, including if it was a falsifying one.
-5. Anything that contradicts the background above. **A clean negative is a
-   result here** — the 2×2 is a hypothesis, not a conclusion to be confirmed.
+1. 第 1 步得到的 Code 通过率分布，以及 parquet join 的匹配率。
+2. 四个混合集各自的逐域行数。
+3. 逐分支、逐域的 dWrong/dt 与 dRight/dt，并说明拟合窗口。
+4. 哪一条判定规则被触发了 —— 包括触发的是证伪性的那一条。
+5. 任何与上述背景相矛盾的东西。**一个干净的阴性结果在这里也是结果** —— 2×2 是一个假设，不是一个待确认的结论。
 
-Report what the runs actually did. If an arm crashed, was misconfigured, or you
-skipped something, say so explicitly rather than reporting partial numbers as
-complete.
+报告这些运行实际做了什么。如果某个分支崩了、配错了，或你跳过了什么，请明确说出来，而不是把部分数字当作完整结果上报。
 
-## Context
+## 背景资料
 
-Full research plan and the merge-side results:
-`research/ideas/parallel_then_merge_vs_joint_rl.md`.
-All measurements behind the background section:
-`research/results/20260920_session_summary.md`.
+完整的研究计划与合并侧的结果：
+`research/ideas/parallel_then_merge_vs_joint_rl.md`。
+背景一节背后的全部测量数据：
+`research/results/20260920_session_summary.md`。
 
-Tools you should reuse rather than reimplement:
+应当复用而不是重新实现的工具：
 
-| tool | purpose |
+| 工具 | 用途 |
 |---|---|
-| `research/parse_train_log.py` | verl console log → metric time series |
-| `research/variance_trajectory.py` | per-domain group-composition dynamics from dumps; also the source of `domain()` |
-| `research/group_stats.py` | per-domain GRPO group statistics for one window |
+| `research/parse_train_log.py` | verl console 日志 → 指标时间序列 |
+| `research/variance_trajectory.py` | 从 dump 计算逐域 group 构成动态；也是 `domain()` 的来源 |
+| `research/group_stats.py` | 单个窗口上的逐域 GRPO group 统计 |

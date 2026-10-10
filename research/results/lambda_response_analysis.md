@@ -1,16 +1,14 @@
-# Uniform-Lambda Response Analysis
+# 统一系数 λ 的响应分析
 
-This is a diagnostic fit to the existing public-test sweep, not a source of
-final hyperparameters. Five-expert Task Arithmetic was evaluated at
-`lambda = {0.4, 0.6, 0.8, 1.0, 1.2}` with `n=16`.
+这是对现有公开测试扫描做的**诊断性拟合**，不是最终超参数的来源。五专家 Task Arithmetic 在
+`lambda = {0.4, 0.6, 0.8, 1.0, 1.2}`、n=16 下做了评测。
 
-For the completed training-pilot sweep and current method decisions, see
-[current findings](current_findings.md). The public sweep below has already
-influenced method selection and is development evidence.
+已完成的训练试点扫描与当前的方法决策见
+[current findings](current_findings.md)。下面这套公开扫描已经影响过方法选择，属于开发证据。
 
-Quadratic fits over the five points give approximate task optima:
+对五个点做二次拟合给出近似的各任务最优点：
 
-| Benchmark | Fitted optimum | Best observed grid point |
+| 基准 | 拟合最优点 | 实测最优网格点 |
 |---|---:|---:|
 | AIME 2025 | 0.805 | 1.0 |
 | AIME 2026 | 0.863 | 0.8 |
@@ -18,22 +16,11 @@ Quadratic fits over the five points give approximate task optima:
 | LiveCodeBench v5 | 1.068 | 1.0 |
 | LiveCodeBench v6 | 0.878 | 0.8 |
 | IFEval | 0.979 | 1.0 |
-| IFBench | at least 1.2 | 1.2 |
+| IFBench | 至少 1.2 | 1.2 |
 | BFCL v3 | 0.904 | 0.8/1.0 |
 
-The exploratory evidence suggests a low-dimensional parameterization with a shared scale
-near `0.9–1.0` and an IF-specific residual scale above it. It does not justify
-independent layer-wise coefficients: those would greatly increase search
-dimension without current evidence.
+探索性证据提示了一个低维参数化：共享尺度在 `0.9–1.0` 附近，外加一个高于它的 IF 专用残差尺度。它**不足以**支撑独立的逐层系数：那会大幅提高搜索维度，而当前并没有相应证据。
 
-Response length rises monotonically in aggregate from 3,203 tokens at
-`lambda=0.4` to 4,595 at `lambda=1.2`. LiveCodeBench v5 accuracy and length are
-strongly correlated across this five-point sweep (`r=0.91`), while IFBench
-accuracy increases as response length decreases (`r=-0.96`). Accuracy-only
-selection can therefore confound capability with generation policy; the
-calibration objective must include length and truncation diagnostics.
+回答长度在总体上单调上升，从 `lambda=0.4` 时的 3,203 token 到 `lambda=1.2` 时的 4,595。在这五点扫描中，LiveCodeBench v5 的准确率与长度强相关（`r=0.91`），而 IFBench 的准确率随回答长度**下降**而上升（`r=-0.96`）。因此，只按准确率选择会把能力与生成策略混为一谈；校准目标必须包含长度与截断诊断。
 
-The training-pilot lambda=0.8/1.0 comparison has an uncertain mean reward gap
-and roughly 9.4% fewer tokens at 0.8. Keep calibrated uniform TA as a
-cost-aware baseline rather than assuming lambda=1 is optimal under every
-objective. Neither uniform sweep identifies separate expert effects.
+训练试点中 lambda=0.8 与 1.0 的对比，均值 reward 差距不确定，而 0.8 时 token 少约 9.4%。请把校准过的统一 TA 当作一个**成本感知**的基线保留，而不是假定 lambda=1 在任何目标下都是最优。两套统一扫描都识别不出各专家独立的效应。
