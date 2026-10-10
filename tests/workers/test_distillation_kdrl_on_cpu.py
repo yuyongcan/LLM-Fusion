@@ -240,7 +240,7 @@ def test_defaults_are_off():
         # beta set but fusion off: the coefficient would be silently discarded
         ({"teacher_advantage_coef": BETA}, "no effect"),
         # unknown fusion mode
-        ({"advantage_fusion": "modulated"}, "must be 'none' or 'additive'"),
+        ({"advantage_fusion": "modulated"}, "must be 'none', 'additive' or 'per_domain'"),
         # non-positive weight pushes the student away from the teacher everywhere
         ({"advantage_fusion": "additive", "teacher_advantage_coef": 0.0}, "must be > 0"),
         ({"advantage_fusion": "additive", "teacher_advantage_coef": -0.1}, "must be > 0"),

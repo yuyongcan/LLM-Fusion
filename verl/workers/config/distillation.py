@@ -15,7 +15,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 from verl.base_config import BaseConfig
 from verl.utils.config import omega_conf_to_dataclass
@@ -142,6 +142,17 @@ class DistillationLossConfig(BaseConfig):
     advantage_fusion: str = "none"
     teacher_advantage_coef: float = 0.0
 
+    # Per-domain routing: which data_source values are supervised by on-policy distillation
+    # instead of by the verifier reward. Only read when advantage_fusion="per_domain".
+    #
+    # Each sample picks exactly one supervisor, rather than a weighted sum of both:
+    #   data_source in opd_data_sources -> A_t = teacher_advantage_coef * (log pi_T - log pi_S)
+    #   otherwise                       -> A_t = the estimator's RL advantage
+    # So `teacher_advantage_coef` is the OPD weight (1.0 is plain OPD), not a mixing ratio:
+    # raising it does not dilute the RL domains, and "additive"'s KDRL behaviour is not
+    # recoverable from this mode. Empty or None disables routing and is rejected at validation.
+    opd_data_sources: Optional[List[str]] = None
+
     # lambda of G-OPD/ExOPD. 1.0 is standard OPD; >1.0 is reward extrapolation.
     reward_extrapolation_lambda: float = 1.0
 
@@ -254,9 +265,10 @@ class DistillationLossConfig(BaseConfig):
 
     def _validate_advantage_fusion(self) -> None:
         """Validate how the teacher signal enters the RL update (KDRL)."""
-        if self.advantage_fusion not in ("none", "additive"):
+        if self.advantage_fusion not in ("none", "additive", "per_domain"):
             raise ValueError(
-                f"advantage_fusion must be 'none' or 'additive', got {self.advantage_fusion!r}."
+                f"advantage_fusion must be 'none', 'additive' or 'per_domain', got "
+                f"{self.advantage_fusion!r}."
             )
 
         if self.advantage_fusion == "none":
@@ -269,21 +281,31 @@ class DistillationLossConfig(BaseConfig):
                 )
             return
 
-        # ---- advantage_fusion == "additive" (KDRL) ----
+        # ---- advantage_fusion in ("additive", "per_domain") ----
+        # "per_domain" reuses the same fused per-token teacher advantage, only routed per sample
+        # instead of applied to every sample, so it inherits every precondition below.
+        if self.advantage_fusion == "per_domain" and not self.opd_data_sources:
+            raise ValueError(
+                "advantage_fusion='per_domain' requires opd_data_sources to name the data_source "
+                "values supervised by OPD. An empty list leaves every sample on the RL advantage "
+                "and the teacher silently does nothing -- indistinguishable from a working run in "
+                "every metric."
+            )
         if self.teacher_advantage_coef <= 0.0:
             raise ValueError(
                 f"teacher_advantage_coef={self.teacher_advantage_coef} must be > 0 when "
-                "advantage_fusion='additive'. A non-positive weight would push the student away "
-                "from the teacher on every token."
+                f"advantage_fusion={self.advantage_fusion!r}. A non-positive weight would push the "
+                "student away from the teacher on every token."
             )
         if not self.use_task_rewards:
             # Without the RL advantage there is nothing to fuse into: the additive form would
             # collapse to plain OPD scaled by beta, which is a different algorithm wearing the
             # same name and would not show up as wrong in any metric.
             raise ValueError(
-                "advantage_fusion='additive' (KDRL) requires use_task_rewards=True: the teacher "
-                "advantage is added to the RL advantage, so with task rewards off there is no RL "
-                "term to add it to."
+                f"advantage_fusion={self.advantage_fusion!r} requires use_task_rewards=True: the "
+                "teacher advantage is fused with the RL advantage (KDRL) or replaces it on the OPD "
+                "domains only (per_domain), and both need the RL term -- the latter because every "
+                "non-OPD sample is still supervised by the verifier reward."
             )
         if self.loss_settings.use_topk:
             raise ValueError(

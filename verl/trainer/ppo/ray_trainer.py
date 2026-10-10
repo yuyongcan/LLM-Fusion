@@ -54,8 +54,8 @@ from verl.trainer.ppo.utils import (
     Role,
     WorkerType,
     need_critic,
-    need_reference_policy,
     need_in_process_teacher,
+    need_reference_policy,
     need_reward_model,
     need_teacher_policy,
 )
@@ -237,6 +237,18 @@ def compute_group_keep_mask(scores: np.ndarray, uids: np.ndarray) -> tuple[np.nd
             stats["groups_all_right"] += 1
 
     return keep, stats
+
+
+def build_opd_mask(data_sources, opd_data_sources) -> np.ndarray:
+    """Per-sample mask marking which samples are supervised by OPD rather than by the reward.
+
+    Kept as a free function because it is the only part of the routing with any logic in it, and
+    it should be testable without a DataProto or a trainer instance.
+    """
+    opd = {str(source) for source in opd_data_sources}
+    return np.array(
+        [1.0 if str(source) in opd else 0.0 for source in data_sources], dtype=np.float32
+    )
 
 
 def compute_advantage(
@@ -1087,10 +1099,18 @@ class RayPPOTrainer:
                 config=self.config,
                 resource_pool=teacher_resource_pool,
             )
-            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
         else:
             self.teacher_model_manager = None
-            self.distillation_config = None
+
+        # The dataclass is read by the actor-update path (and reaches the loss) whenever
+        # distillation is on -- including mode="in_process", which builds no vLLM teacher. Tying
+        # it to the teacher pool left it None there, and _update_actor then died on
+        # `self.distillation_config.distillation_loss` the first time it ran.
+        self.distillation_config: Optional[DistillationConfig] = (
+            omega_conf_to_dataclass(self.config.distillation)
+            if is_distillation_enabled(self.config.get("distillation"))
+            else None
+        )
 
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
@@ -1702,6 +1722,60 @@ class RayPPOTrainer:
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
+    def _attach_opd_mask(self, batch: DataProto) -> None:
+        """Write the per-sample OPD routing mask, for ``advantage_fusion='per_domain'``.
+
+        Distillation is normally a global switch: with a single teacher every sample is
+        distilled, and with several the router maps every sample to one. "per_domain" is
+        different -- whether a sample is distilled or reinforced is a property of the sample,
+        not of the teacher -- so the loss cannot infer it from the teacher log probs and needs
+        an explicit mask.
+
+        It is derived here from ``data_source``, the same field the teacher router reads, and
+        written as a plain ``(bsz,)`` float tensor. Being per-sample and rank-1 is what lets it
+        survive no-padding conversion and micro-batch splitting and reach the loss untouched,
+        where the loss broadcasts it over the response dimension.
+
+        No-op unless both the fusion mode and a non-empty domain list are configured; the
+        dataclass validation rejects the inconsistent combinations.
+        """
+        distillation_config = self.config.get("distillation", None)
+        if not is_distillation_enabled(distillation_config):
+            return
+        loss_config = distillation_config.get("distillation_loss", None)
+        if loss_config is None:
+            return
+        if loss_config.get("advantage_fusion", "none") != "per_domain":
+            return
+        opd_sources = loss_config.get("opd_data_sources", None)
+        if not opd_sources:
+            return
+
+        if "data_source" not in batch.non_tensor_batch:
+            raise ValueError(
+                "advantage_fusion='per_domain' routes samples to OPD by 'data_source', but that "
+                "column is absent from the batch."
+            )
+        mask = build_opd_mask(batch.non_tensor_batch["data_source"], opd_sources)
+        batch_size = batch.batch.batch_size[0]
+        if mask.shape[0] != batch_size:
+            raise ValueError(
+                f"opd_mask has {mask.shape[0]} entries but the batch has {batch_size} samples; "
+                "'data_source' and the batch are out of sync."
+            )
+        batch.batch["opd_mask"] = torch.from_numpy(mask)
+
+        # A run matching nothing is not routing at all: the teacher becomes dead weight and every
+        # metric still looks like a healthy RLVR run. Warn once rather than once per step, since
+        # this fires on every step of a mis-configured run.
+        if float(mask.mean()) == 0.0 and not getattr(self, "_warned_opd_no_match", False):
+            self._warned_opd_no_match = True
+            print(
+                "WARNING: per_domain OPD matched no sample. opd_data_sources="
+                f"{sorted(str(source) for source in opd_sources)} does not match any data_source "
+                "in the batch, so every sample falls back to the RLVR advantage."
+            )
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1719,6 +1793,12 @@ class RayPPOTrainer:
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        # Pure supervised top-k distillation only needs sampled-token log probs for PPO metrics.
+        log_probs_requires_grad = not (
+            distillation_use_topk
+            and not self.distillation_config.distillation_loss.use_policy_gradient
+            and not self.distillation_config.distillation_loss.use_task_rewards
+        )
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1728,6 +1808,7 @@ class RayPPOTrainer:
             batch_td,
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
+            log_probs_requires_grad=log_probs_requires_grad,
             # Ask the student's training forward for the same layers the teacher returned. Empty
             # when representation distillation is off, so no hidden states are allocated.
             rep_hidden_layers=self._rep_hidden_layers(),
@@ -2116,6 +2197,11 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+
+                        # Attach the OPD/RLVR routing mask *after* advantages exist, so the RL
+                        # advantage is still computed (and reported) for every sample. The loss
+                        # then selects which of the two supervises each sample.
+                        self._attach_opd_mask(batch)
 
                     # update critic
                     if self.use_critic:

@@ -424,14 +424,20 @@ class AgentLoopWorker:
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
+        # Under distillation.mode="in_process" there is no vLLM teacher pool: the teacher is
+        # fused into ActorRolloutRefWorker and scored once per step by the trainer, so this
+        # worker is handed no client. Building the manager anyway made it call .keys() on None
+        # and killed the actor. Leave it unbuilt and let _compute_teacher_logprobs skip.
+        self.teacher_server_manager = None
         if self.distillation_enabled:
-            from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
-
             self.teacher_key: str = config.distillation.teacher_key
-            self.teacher_server_manager = AsyncTeacherLLMServerManager(
-                config=config,
-                teacher_client=teacher_client,
-            )
+            if teacher_client is not None:
+                from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
+
+                self.teacher_server_manager = AsyncTeacherLLMServerManager(
+                    config=config,
+                    teacher_client=teacher_client,
+                )
 
         # Load tools once per worker; each trajectory just reuses self.tools.
         tool_config_path = self.rollout_config.multi_turn.tool_config_path
@@ -910,7 +916,9 @@ class AgentLoopWorker:
         sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         """Compute teacher logprobs for single sample."""
-        if self.distillation_enabled and not validate:
+        # Skipped under mode="in_process": no vLLM teacher to call per sample, the trainer
+        # computes the fused teacher's log probs once per step instead.
+        if self.distillation_enabled and self.teacher_server_manager is not None and not validate:
             routing_key = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)

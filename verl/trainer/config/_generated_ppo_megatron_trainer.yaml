@@ -100,7 +100,7 @@ actor_rollout_ref:
       kl_cov_ratio: 0.0002
       ppo_kl_coef: 0.1
     clip_ratio_c: 3.0
-    loss_agg_mode: token-mean
+    loss_agg_mode: seq-mean-token-mean
     loss_scale_factor: null
     entropy_coeff: 0
     calculate_entropy: false
@@ -839,6 +839,7 @@ distillation:
     topk: 32
     use_task_rewards: true
     advantage_fusion: none
+    opd_data_sources: []
     teacher_advantage_coef: 0.0
     distillation_loss_coef: 1.0
     loss_max_clamp: null

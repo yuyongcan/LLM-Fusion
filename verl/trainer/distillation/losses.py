@@ -20,6 +20,7 @@ from tensordict import TensorDict
 
 from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.losses import ppo_loss
@@ -158,12 +159,25 @@ def compute_topk_loss(
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
 
+    loss_kwargs = {}
+    if loss_mode == "argmax_ce":
+        # The actor's sampled-token loss and entropy must not read logits overwritten by CE.
+        loss_kwargs["inplace_backward"] = not any(
+            tu.get_non_tensor_data(data, key=key, default=default)
+            for key, default in (
+                ("log_probs_requires_grad", True),
+                ("calculate_entropy", False),
+                ("calculate_sum_pi_squared", False),
+            )
+        )
+
     outputs = distillation_loss_fn(
         student_logits=student_logits,
         teacher_topk_log_probs=data["teacher_logprobs"],
         teacher_topk_ids=data["teacher_ids"],
         config=distillation_config,
         data_format=data_format,
+        **loss_kwargs,
     )
 
     expected_shape = student_logits.shape[:2]
@@ -218,7 +232,10 @@ def distillation_ppo_loss(
     # Called as final policy loss
     loss_config = distillation_config.distillation_loss
 
-    if loss_config.advantage_fusion == "additive":
+    # "additive" (KDRL) and "per_domain" share the fused-advantage machinery: one PPO clip over a
+    # per-token advantage that carries the teacher signal. They differ only in how that advantage
+    # is composed -- summed everywhere, versus routed per sample.
+    if loss_config.advantage_fusion in ("additive", "per_domain"):
         # KDRL (https://arxiv.org/abs/2506.02208): the teacher signal enters the *same* advantage
         # as the verifiable reward, so the two are fused before clipping:
         #
@@ -235,11 +252,18 @@ def distillation_ppo_loss(
         advantages = data["advantages"]
         if advantages.is_nested:
             advantages = advantages.to_padded_tensor(0.0)
-        fused_advantages = advantages + loss_config.teacher_advantage_coef * teacher_advantage
+        if loss_config.advantage_fusion == "additive":
+            fused_advantages = advantages + loss_config.teacher_advantage_coef * teacher_advantage
+            routing_metrics: dict[str, Any] = {}
+        else:
+            fused_advantages, routing_metrics = fuse_advantages_per_domain(
+                advantages, teacher_advantage, loss_config.teacher_advantage_coef, data
+            )
         policy_loss, policy_metrics = ppo_loss(
             config, model_output, data, dp_group, advantages=fused_advantages
         )
         policy_metrics.update(teacher_metrics)
+        policy_metrics.update(routing_metrics)
         # The teacher no longer contributes its own loss term, so distillation/loss is absent by
         # design. Reading a run's teacher weight from `distillation/teacher_advantage_*` instead.
     else:
@@ -328,6 +352,83 @@ def compute_representation_loss(
         mask,
         normalize=loss_config.rep_normalize,
     )
+
+
+def fuse_advantages_per_domain(
+    advantages: torch.Tensor,
+    teacher_advantage: torch.Tensor,
+    teacher_advantage_coef: float,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Pick one supervisor per sample: OPD on the configured domains, the verifier elsewhere.
+
+    This is the routed counterpart of ``advantage_fusion="additive"`` (KDRL). KDRL adds the two
+    signals on every token; here they never mix -- a sample is either distilled or reinforced:
+
+        data_source in opd_data_sources -> A_t = coef * (log pi_teacher - log pi_student)
+        otherwise                       -> A_t = the estimator's RL advantage
+
+    Keeping the selection in ``advantages`` rather than masking the two losses separately is
+    deliberate: ``agg_loss`` normalises by the token count of the whole global batch, so two
+    independently masked losses would each be scaled by a denominator from a different sample
+    population, and the effective weight of each domain would drift with the batch's domain mix.
+
+    Returns the fused advantage plus diagnostics that make a mis-routed run visible: the OPD
+    sample fraction and, on OPD response tokens only, the mean teacher advantage. A run where
+    the fraction is 0.0 (or 1.0) is not routing at all, and the mean teacher advantage should
+    start positive and decay toward 0 as the student converges onto the teacher.
+    """
+    if "opd_mask" not in data.keys():
+        raise ValueError(
+            "advantage_fusion='per_domain' needs a per-sample 'opd_mask' in the batch, but it is "
+            "absent. It is written by the trainer from distillation_loss.opd_data_sources; check "
+            "that the training loop runs the routing step before update_actor."
+        )
+
+    opd_mask = data["opd_mask"]
+    if opd_mask.is_nested:
+        opd_mask = opd_mask.to_padded_tensor(0.0)
+    # (bsz,) -> broadcast over the response dimension so torch.where can select per sample.
+    sample_is_opd = opd_mask.to(device=advantages.device).bool()
+    while sample_is_opd.dim() < advantages.dim():
+        sample_is_opd = sample_is_opd.unsqueeze(-1)
+    token_is_opd = sample_is_opd.expand_as(advantages)
+
+    fused_advantages = torch.where(
+        token_is_opd, teacher_advantage_coef * teacher_advantage, advantages
+    )
+
+    response_mask = data["response_mask"]
+    if response_mask.is_nested:
+        response_mask = response_mask.to_padded_tensor(False)
+    response_mask = response_mask.bool()
+
+    metrics: dict[str, Any] = {
+        "distillation/opd_sample_frac": Metric(
+            AggregationType.MEAN, sample_is_opd.float().mean()
+        ),
+    }
+    # Every metric below must be emitted on *every* micro batch, including ones with no OPD
+    # sample at all. DP aggregation (verl.utils.metric.utils.aggregate_dp) requires all Metric
+    # instances to hold the same number of values -- one per micro batch -- so a metric that
+    # appears only on some batches raises "All Metric instances must have the same number of
+    # values for dp aggregation" and kills the step. Micro batches with no routed sample are
+    # normal here (IF is ~12% of the mixture), so this is the common case, not an edge case.
+    opd_tokens = response_mask & token_is_opd
+    zero = torch.zeros((), device=advantages.device)
+    if opd_tokens.any():
+        opd_adv = teacher_advantage[opd_tokens]
+        opd_adv_mean = opd_adv.mean()
+        # Share of OPD response tokens the teacher still scores above the student. Decays toward
+        # 0.5 as the student converges onto the teacher.
+        opd_preferred = (opd_adv > 0).float().mean()
+    else:
+        # A whole run at 0.0 means opd_data_sources matched nothing; opd_sample_frac above
+        # surfaces that. A single empty micro batch is expected and says nothing.
+        opd_adv_mean, opd_preferred = zero, zero
+    metrics["distillation/opd_teacher_advantage_mean"] = Metric(AggregationType.MEAN, opd_adv_mean)
+    metrics["distillation/opd_teacher_preferred_frac"] = Metric(AggregationType.MEAN, opd_preferred)
+    return fused_advantages, metrics
 
 
 def compute_teacher_advantage(

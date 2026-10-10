@@ -84,12 +84,39 @@ distillation_loss:
   #             update the verifier wanted -- the exact property that motivated the
   #             teacher-modulated variants.
   #
-  # "additive" requires use_task_rewards=true and an estimator loss_mode (k1, k3, ...), and
-  # reports the teacher term under distillation/teacher_advantage_* rather than
-  # distillation/loss.
+  #   per_domain  per-sample routing: samples whose data_source is listed in opd_data_sources
+  #               are supervised by OPD alone, every other sample by the verifier reward alone:
+  #
+  #                 A_t = teacher_advantage_coef * (log pi_teacher - log pi_student)   [OPD]
+  #                 A_t = A_hat                                                        [RLVR]
+  #
+  #               The two never mix. This is deliberately NOT "KDRL with a per-sample beta":
+  #               raising teacher_advantage_coef does not dilute the RLVR domains, and no
+  #               setting of it reproduces "additive". It exists to distil one domain from a
+  #               teacher that is strong there while the rest of the mixture keeps its own
+  #               verifiable reward. Requires opd_data_sources to be non-empty.
+  #
+  # "additive" and "per_domain" both require use_task_rewards=true and an estimator loss_mode
+  # (k1, k3, ...), and both report the teacher term under distillation/teacher_advantage_*
+  # rather than distillation/loss.
   advantage_fusion: none
 
+  # data_source values supervised by OPD instead of the verifier reward. Only read when
+  # advantage_fusion="per_domain", and required there (an empty list is rejected: it would
+  # leave every sample on the RL advantage and the teacher would silently do nothing).
+  # Matched exactly against the batch's data_source column, e.g. "LLM-Fusion/IF".
+  #
+  # ⚠️ Under "per_domain", configure exactly ONE teacher. The teacher advantage is computed for
+  #    every sample and only then discarded on the non-OPD ones, so a multi-teacher setup would
+  #    also need a teacher for each non-OPD domain -- otherwise the router raises "No teacher
+  #    configured for routing key ...". With a single teacher the router ignores the sample's key
+  #    and serves every sample, which is what this mode needs. The cost is that teacher log probs
+  #    are computed for samples that never consume them.
+  opd_data_sources: []
+
   # beta of KDRL: weight of the teacher advantage. Ignored unless advantage_fusion="additive".
+  # Under "per_domain" it instead scales the OPD term on the routed domains only -- 1.0 is
+  # plain OPD, and raising it strengthens distillation without touching the RLVR domains.
   # ⚠️ Extremely task-sensitive -- reported values span two orders of magnitude (0.2 on some
   #    logic tasks, 0.02 on others, 0.002 on math). Treat any value carried over from another
   #    task as a starting point for an ablation, not as a setting.
