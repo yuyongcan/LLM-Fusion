@@ -34,10 +34,13 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from verl.trainer.distillation.fsdp.losses import _gather_log_softmax
 from verl.trainer.distillation.fsdp.losses import compute_argmax_ce as compute_fsdp_argmax_ce
 from verl.trainer.distillation.fsdp.losses import compute_forward_kl_topk as compute_fsdp_forward_kl_topk
 from verl.trainer.distillation.losses import compute_argmax_ce as collect_argmax_ce_metrics
 from verl.trainer.distillation.losses import compute_forward_kl_topk as collect_forward_kl_topk_metrics
+from verl.trainer.distillation.losses import compute_topk_loss
+from verl.utils import tensordict_utils as tu
 from verl.workers.config import DistillationLossConfig
 
 _VOCAB_SIZE = 6
@@ -271,3 +274,126 @@ def test_argmax_ce_rejects_policy_gradient():
 
     with pytest.raises(ValueError, match="use_policy_gradient"):
         DistillationLossConfig(loss_mode="argmax_ce", topk=1, use_policy_gradient=True)
+
+
+def test_loss_backpropagates_to_the_logits():
+    """The loss must stay differentiable w.r.t. student_logits, and match the dense gradient.
+
+    On GPU this routes through flash-attn's fused CE, which backpropagates in place; the gradient
+    it produces is the thing worth pinning, since a forward-only equivalence would not catch a
+    detached or mis-scaled backward.
+    """
+    base = torch.tensor(
+        [[0.0, 2.0, 1.0, 0.5, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0, 3.0, 0.0], [2.0, 1.0, 0.5, 0.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    ).unsqueeze(0)
+    teacher_ids = _nested_from_rows([[1], [4], [3]]).to(torch.int64)
+    teacher_logprobs = _nested_from_rows([[-0.3], [-0.5], [-0.7]]).to(torch.float32)
+
+    chunked_logits = base.clone().requires_grad_(True)
+    output = compute_fsdp_argmax_ce(
+        student_logits=chunked_logits,
+        teacher_topk_log_probs=teacher_logprobs,
+        teacher_topk_ids=teacher_ids,
+        config=_make_config(),
+        data_format="thd",
+    )
+    output["distillation_losses"].sum().backward()
+
+    dense_logits = base.clone().requires_grad_(True)
+    dense_loss = -torch.log_softmax(dense_logits, dim=-1).gather(dim=-1, index=torch.tensor([[[1], [4], [3]]]))
+    dense_loss.sum().backward()
+
+    assert chunked_logits.grad is not None
+    torch.testing.assert_close(chunked_logits.grad, dense_logits.grad)
+
+
+def test_argmax_diagnostic_does_not_retain_a_graph():
+    """overlap_count is a metric, not a loss: it must not hold the logits graph alive.
+
+    If the argmax path kept requires_grad, every micro batch would pin its logits until the
+    metric tensor was freed -- reintroducing the memory this change removes, and silently.
+    It also has to be read before the CE call, which may overwrite the logits in place.
+    """
+    logits = torch.randn(1, 5, _VOCAB_SIZE, requires_grad=True)
+    teacher_ids = _nested_from_rows([[0], [1], [2], [3], [4]]).to(torch.int64)
+    teacher_logprobs = _nested_from_rows([[-0.1], [-0.2], [-0.3], [-0.4], [-0.5]]).to(torch.float32)
+
+    output = compute_fsdp_argmax_ce(
+        student_logits=logits,
+        teacher_topk_log_probs=teacher_logprobs,
+        teacher_topk_ids=teacher_ids,
+        config=_make_config(),
+        data_format="thd",
+    )
+
+    assert not output["overlap_count"].requires_grad
+    assert output["distillation_losses"].requires_grad
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16])
+@pytest.mark.parametrize("requires_grad", [True, False])
+def test_log_probs_fallback_matches_dense_across_chunks(dtype: torch.dtype, requires_grad: bool):
+    torch.manual_seed(0)
+    logits = torch.randn(1, 259, 31, dtype=dtype, requires_grad=requires_grad)
+    ids = torch.randint(0, 31, (1, 259, 1))
+    weights = torch.linspace(0.1, 1.0, 259).unsqueeze(0)
+    dense_logits = logits.detach().clone().requires_grad_(requires_grad)
+    normalized_logits = dense_logits.float() if dtype == torch.bfloat16 else dense_logits
+    expected = torch.log_softmax(normalized_logits, dim=-1).gather(-1, ids).squeeze(-1)
+
+    actual = _gather_log_softmax(logits, ids)
+    torch.testing.assert_close(actual, expected)
+    if requires_grad:
+        (actual * weights).sum().backward()
+        (expected * weights).sum().backward()
+        torch.testing.assert_close(logits.grad, dense_logits.grad)
+
+
+def test_fallback_does_not_save_full_vocab_normalization_tables():
+    logits = torch.randn(1, 259, 31, requires_grad=True)
+    ids = torch.randint(0, 31, (1, 259, 1))
+    saved = []
+
+    def record_saved(tensor: torch.Tensor) -> torch.Tensor:
+        saved.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(record_saved, lambda tensor: tensor):
+        log_probs = _gather_log_softmax(logits, ids)
+
+    # Checkpoint may save input views, but not independent vocabulary-sized intermediates.
+    vocab_tensors = [tensor for tensor in saved if tensor.ndim >= 2 and tensor.shape[-1] == 31]
+    assert vocab_tensors
+    assert all(tensor.untyped_storage().data_ptr() == logits.untyped_storage().data_ptr() for tensor in vocab_tensors)
+    log_probs.sum().backward()
+    assert logits.grad is not None
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_inplace"),
+    [
+        ({}, False),
+        ({"log_probs_requires_grad": True}, False),
+        ({"log_probs_requires_grad": False}, True),
+        ({"log_probs_requires_grad": False, "calculate_entropy": True}, False),
+        ({"log_probs_requires_grad": False, "calculate_sum_pi_squared": True}, False),
+    ],
+)
+def test_argmax_ce_inplace_backward_requires_exclusive_logits(monkeypatch, metadata, expected_inplace):
+    import verl.trainer.distillation.fsdp.losses as fsdp_losses
+
+    def fake_argmax_ce(*, student_logits, inplace_backward, **kwargs):
+        assert inplace_backward is expected_inplace
+        return {"distillation_losses": student_logits.sum(dim=-1)}
+
+    monkeypatch.setattr(fsdp_losses, "compute_argmax_ce", fake_argmax_ce)
+    data = TensorDict({"teacher_logprobs": torch.zeros(1), "teacher_ids": torch.zeros(1)}, batch_size=[])
+    tu.assign_non_tensor(data, **metadata)
+    compute_topk_loss(
+        config=SimpleNamespace(strategy="fsdp"),
+        distillation_config=SimpleNamespace(distillation_loss=SimpleNamespace(loss_mode="argmax_ce")),
+        data=data,
+        student_logits=torch.zeros(1, 1, _VOCAB_SIZE),
+        data_format="thd",
+    )

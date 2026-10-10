@@ -41,6 +41,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from verl.trainer.distillation.fsdp.losses import compute_argmax_ce as compute_fsdp_argmax_ce
 from verl.trainer.distillation.fsdp.losses import compute_forward_kl_topk as compute_fsdp_forward_kl_topk
 from verl.trainer.distillation.losses import compute_forward_kl_topk as collect_forward_kl_topk_metrics
 from verl.utils import tensordict_utils as tu
@@ -160,6 +161,67 @@ def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding):
             f"Expected '{k}' to be a nested tensor (use_remove_padding={use_remove_padding}); "
             f"got {type(model_output[k])}"
         )
+
+
+@pytest.mark.parametrize("use_remove_padding", [True, False])
+@pytest.mark.parametrize("log_probs_requires_grad", [True, False])
+def test_argmax_ce_and_sampled_log_probs_share_logits_safely(use_remove_padding, log_probs_requires_grad):
+    torch.manual_seed(0)
+    total_nnz = 3
+    offsets = torch.tensor([0, total_nnz])
+    input_ids = torch.nested.nested_tensor_from_jagged(torch.tensor([1, 2, 3]), offsets)
+    labels = torch.tensor([2, 3, 1])
+    teacher_ids = torch.tensor([4, 5, 6])
+    logits = torch.randn(1, total_nnz, _VOCAB_SIZE, requires_grad=True)
+    output = SimpleNamespace(logits=logits * 1.0)
+    output_args = {
+        "input_ids_rmpad_rolled": labels,
+        "temperature_rmpad": torch.ones(total_nnz),
+        "temperature": torch.ones(1),
+    }
+    micro_batch = TensorDict({"input_ids": input_ids}, batch_size=[])
+    tu.assign_non_tensor(
+        micro_batch,
+        use_remove_padding=use_remove_padding,
+        pad_mode=DatasetPadMode.NO_PADDING,
+        use_fused_kernels=False,
+        calculate_entropy=False,
+        distillation_use_topk=True,
+        log_probs_requires_grad=log_probs_requires_grad,
+    )
+
+    def sampled_log_probs(*, logits, labels, inplace_backward):
+        # A second differentiable consumer cannot reuse the CE logits as a gradient buffer.
+        assert inplace_backward is False
+        assert torch.is_grad_enabled() is log_probs_requires_grad
+        return torch.log_softmax(logits, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+
+    def argmax_ce_processor(student_logits, data):
+        return compute_fsdp_argmax_ce(
+            student_logits,
+            torch.nested.nested_tensor_from_jagged(torch.zeros(total_nnz, 1), offsets),
+            torch.nested.nested_tensor_from_jagged(teacher_ids.unsqueeze(-1), offsets),
+            SimpleNamespace(distillation_loss=SimpleNamespace(log_prob_min_clamp=None)),
+            data_format="thd",
+        )
+
+    with patch("verl.workers.engine.fsdp.transformer_impl.logprobs_from_logits", side_effect=sampled_log_probs):
+        model_output = FSDPEngineWithLMHead.prepare_model_outputs(
+            _make_engine_stub(), output, output_args, micro_batch, argmax_ce_processor
+        )
+    assert model_output["log_probs"].requires_grad is log_probs_requires_grad
+    loss = model_output["distillation_losses"].values().sum()
+    if log_probs_requires_grad:
+        loss = loss - 0.3 * model_output["log_probs"].values().sum()
+    loss.backward()
+
+    dense_logits = logits.detach().clone().requires_grad_(True)
+    dense_log_probs = torch.log_softmax(dense_logits.squeeze(0), dim=-1)
+    expected_loss = -dense_log_probs.gather(-1, teacher_ids.unsqueeze(-1)).sum()
+    if log_probs_requires_grad:
+        expected_loss = expected_loss - 0.3 * dense_log_probs.gather(-1, labels.unsqueeze(-1)).sum()
+    expected_loss.backward()
+    torch.testing.assert_close(logits.grad, dense_logits.grad)
 
 
 def _nested_from_rows(rows):

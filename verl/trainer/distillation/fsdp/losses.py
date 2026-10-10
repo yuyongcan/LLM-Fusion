@@ -15,7 +15,12 @@
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
+from verl.utils.torch_functional import (
+    FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE,
+    logprobs_from_logits,
+)
 from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_world_size,
     slice_input_tensor,
@@ -94,12 +99,43 @@ def compute_forward_kl_topk(
     }
 
 
+def _gather_log_softmax(logits: torch.Tensor, ids: torch.Tensor, inplace_backward: bool = False) -> torch.Tensor:
+    """Gather exact log probabilities without retaining a full-vocabulary log-softmax table.
+
+    Reuse SFT's fused CE on CUDA. In-place backward is only safe when no other differentiable
+    consumer (sampled-token log probs, entropy, etc.) shares the logits. Without the fused kernel,
+    checkpoint small token chunks so normalization tables are recomputed rather than retained.
+    """
+    if FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE and logits.is_cuda:
+        return logprobs_from_logits(logits=logits, labels=ids.squeeze(-1), inplace_backward=inplace_backward)
+
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    flat_ids = ids.reshape(-1)
+    log_probs = []
+
+    def chunk_log_probs(chunk_logits: torch.Tensor, chunk_ids: torch.Tensor) -> torch.Tensor:
+        if chunk_logits.dtype in (torch.float16, torch.bfloat16):
+            chunk_logits = chunk_logits.float()
+        return -F.cross_entropy(chunk_logits, chunk_ids, reduction="none")
+
+    for chunk_logits, chunk_ids in zip(flat_logits.split(128), flat_ids.split(128), strict=True):
+        if torch.is_grad_enabled() and chunk_logits.requires_grad:
+            chunk_log_prob = checkpoint(
+                chunk_log_probs, chunk_logits, chunk_ids, use_reentrant=False, preserve_rng_state=False
+            )
+        else:
+            chunk_log_prob = chunk_log_probs(chunk_logits, chunk_ids)
+        log_probs.append(chunk_log_prob)
+    return torch.cat(log_probs).reshape(logits.shape[:-1])
+
+
 def compute_argmax_ce(
     student_logits: torch.Tensor,
     teacher_topk_log_probs: torch.Tensor,
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
+    inplace_backward: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Cross-entropy against the teacher's argmax token: on-policy seqKD.
 
@@ -129,6 +165,8 @@ def compute_argmax_ce(
         teacher_topk_log_probs: (bsz, seqlen, topk) nested. topk must be 1 (config-time check).
         teacher_topk_ids: (bsz, seqlen, topk) nested.
         data_format: "thd" or "bshd". Unused; kept for signature parity with the top-k loss.
+        inplace_backward: Allow fused CE to overwrite logits during backward. Only safe when
+            this loss is the sole differentiable consumer of the logits.
 
     Returns:
         The same keys as :func:`compute_forward_kl_topk`, so the engine path is unchanged.
@@ -147,7 +185,6 @@ def compute_argmax_ce(
     assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_logits.shape[:2]
 
     loss_config: DistillationLossConfig = config.distillation_loss
-    student_log_probs = F.log_softmax(student_logits, dim=-1)
 
     # vLLM returns the top-k slice sorted, so slot 0 is already the argmax -- but re-deriving
     # it from the log probs keeps this correct for any backend that does not sort.
@@ -155,7 +192,11 @@ def compute_argmax_ce(
     argmax_ids = teacher_topk_ids.gather(dim=-1, index=best_slot)
     teacher_log_prob = teacher_topk_log_probs.gather(dim=-1, index=best_slot).squeeze(-1)
 
-    student_log_prob = student_log_probs.gather(dim=-1, index=argmax_ids).squeeze(-1)
+    # Raw logits and log probabilities have the same ranking; no vocabulary-sized table needed.
+    with torch.no_grad():
+        student_argmax_ids = student_logits.argmax(dim=-1)
+
+    student_log_prob = _gather_log_softmax(student_logits, argmax_ids, inplace_backward=inplace_backward)
     if loss_config.log_prob_min_clamp is not None:
         # Bounds the loss at -log_prob_min_clamp instead of letting a single token the student
         # assigns ~0 probability contribute an unbounded term.
@@ -168,11 +209,8 @@ def compute_argmax_ce(
     student_mass = student_log_prob.exp()
     teacher_mass = teacher_log_prob.exp()
 
-    student_argmax_ids = torch.topk(student_log_probs, k=1, dim=-1).indices
-    agreement = (argmax_ids == student_argmax_ids).squeeze(-1).float()
-    overlap_token_advantage = torch.where(
-        agreement.bool(), distillation_losses, torch.zeros_like(distillation_losses)
-    )
+    agreement = (argmax_ids.squeeze(-1) == student_argmax_ids).float()
+    overlap_token_advantage = torch.where(agreement.bool(), distillation_losses, torch.zeros_like(distillation_losses))
 
     return {
         "distillation_losses": distillation_losses,

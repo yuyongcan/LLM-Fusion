@@ -1075,6 +1075,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
             data=micro_batch, key="calculate_sum_pi_squared", default=False
         )
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+        log_probs_requires_grad = tu.get_non_tensor_data(data=micro_batch, key="log_probs_requires_grad", default=True)
         # Representation distillation: which hidden-state layers to return, if any. Empty means
         # the model was not asked for hidden states and output.hidden_states will be absent.
         rep_layers = tu.get_non_tensor_data(data=micro_batch, key="rep_hidden_layers", default=())
@@ -1117,14 +1118,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                inplace_backward = True
-                if calculate_entropy:
-                    inplace_backward = False
-                log_probs = logprobs_from_logits(
-                    logits=logits_rmpad,
-                    labels=input_ids_rmpad_rolled,
-                    inplace_backward=inplace_backward,
-                )
+                inplace_backward = not (calculate_entropy or calculate_sum_pi_squared or distillation_use_topk)
+                with torch.set_grad_enabled(torch.is_grad_enabled() and log_probs_requires_grad):
+                    log_probs = logprobs_from_logits(
+                        logits=logits_rmpad,
+                        labels=input_ids_rmpad_rolled,
+                        inplace_backward=inplace_backward,
+                    )
 
                 # compute entropy
                 if calculate_entropy:
@@ -1216,7 +1216,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
                     logits_rmpad = torch.cat([t for t in logits.unbind()])
                     input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
-                    log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+                    inplace_backward = not (calculate_entropy or calculate_sum_pi_squared or distillation_use_topk)
+                    with torch.set_grad_enabled(torch.is_grad_enabled() and log_probs_requires_grad):
+                        log_probs = logprobs_from_logits(
+                            logits=logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=inplace_backward,
+                        )
 
                     # Mirror the use_remove_padding=True branch (see verl#6293).
                     # No Ulysses SP gather here: this branch is the no-SP path
