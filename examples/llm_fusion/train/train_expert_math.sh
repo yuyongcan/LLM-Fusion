@@ -53,7 +53,7 @@ PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-128}
 # rather than cutting it, so filter_overlong_prompts below drops the handful of
 # outliers at load time instead.
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-5120}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-24576}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 USE_KL_LOSS=${USE_KL_LOSS:-True}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}

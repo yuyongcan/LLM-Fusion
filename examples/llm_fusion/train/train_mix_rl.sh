@@ -52,7 +52,7 @@ PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-128}
 # domain and all of BFCL v3, and `filter_overlong_prompts` then empties the
 # dataset entirely (num_samples=0 at the sampler).
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-5120}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-24576}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 USE_KL_LOSS=${USE_KL_LOSS:-True}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
@@ -62,6 +62,10 @@ NORM_ADV_BY_STD_IN_GRPO=${NORM_ADV_BY_STD_IN_GRPO:-FALSE}
 # aggregation weights follow prompt counts rather than response token counts.
 # Set LOSS_AGG_MODE=token-mean to recover the previous token-weighted aggregation.
 LOSS_AGG_MODE=${LOSS_AGG_MODE:-seq-mean-token-mean}
+# False: every batch blends all five domains (the released Mix baseline).
+# True: one batch per domain, rotating Math -> Science -> Code -> IF -> Agent,
+# so each step trains on a single domain.
+DOMAIN_BATCHING=${DOMAIN_BATCHING:-False}
 
 # ---- rollout ----
 ROLLOUT_TP=${ROLLOUT_TP:-1}
@@ -98,6 +102,7 @@ DATA=(
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.shuffle=True
+    data.domain_batching=${DOMAIN_BATCHING}
     data.filter_overlong_prompts=True
     data.truncation='error'
     data.return_raw_chat=True
