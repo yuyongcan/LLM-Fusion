@@ -342,8 +342,8 @@ bash run_train_multinode.sh code trainer.val_before_train=True   # 可追加 hyd
 
 拓扑自动推导，超参默认基本按论文（batch 128 / mini 128 / n=16 /
 prompt 5120 / lr 1e-6 / GRPO + `norm_adv_by_std_in_grpo=FALSE` / KL loss
-`low_var_kl` coef 0.001 / temp 1.0）。resp 默认 24576（论文 16384），给长思维链
-留余量。所有 `XXX=${XXX:-默认}` 都可以用环境变量覆盖。
+`low_var_kl` coef 0.001 / temp 1.0）。resp 默认 16384（= 论文值）。所有
+`XXX=${XXX:-默认}` 都可以用环境变量覆盖，要留更长余量就 `MAX_RESPONSE_LENGTH=24576`。
 
 ### ⚠️ Agent 域必须传 `default_agent_loop=tool_agent`
 

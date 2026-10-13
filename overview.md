@@ -888,4 +888,4 @@ actor_rollout_ref.actor.checkpoint.save_contents='["model"]'
 
 一次跑通的 AIME2025 冒烟结果（base，`VAL_N=4`、`MAX_RESPONSE_LENGTH=4096`）：
 `mean@4 = 0.317`。注意该次 response 均长 3468 已接近 4096 上限，
-**被截断压低了分数**，正式评测用默认 24576。
+**被截断压低了分数**，正式评测用默认 16384。
