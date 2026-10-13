@@ -452,6 +452,8 @@ data:
   return_raw_chat: true
   return_full_prompt: false
   shuffle: true
+  domain_batching: false
+  domain_key: data_source
   seed: null
   dataloader_num_workers: 8
   image_patch_size: 14

@@ -361,6 +361,20 @@ def create_rl_sampler(data_config, dataset):
     # torch.utils.data.RandomSampler could not recover properly
     from torchdata.stateful_dataloader.sampler import RandomSampler
 
+    # Mixed-domain runs blend every domain into every batch by default. With
+    # `domain_batching` the domains instead take turns: one single-domain batch
+    # per step, rotating over `data.domain_key`.
+    if data_config.get("domain_batching", False):
+        from verl.utils.dataset.domain_sampler import DomainRoundRobinSampler
+
+        return DomainRoundRobinSampler(
+            dataset=dataset,
+            batch_size=data_config.get("gen_batch_size", None) or data_config.train_batch_size,
+            domain_key=data_config.get("domain_key", "data_source"),
+            shuffle=data_config.shuffle,
+            seed=data_config.get("seed"),
+        )
+
     # Use a sampler to facilitate checkpoint resumption.
     # If shuffling is enabled in the data configuration, create a random sampler.
     if data_config.shuffle:

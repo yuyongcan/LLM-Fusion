@@ -72,6 +72,19 @@ return_full_prompt: False
 # Whether to shuffle the data in the dataloader.
 shuffle: True
 
+# How to compose a batch in mixed-domain training.
+# False (default): the sampler draws a shuffled batch from the whole blend, so
+# every step mixes all domains.
+# True: the sampler takes one batch from a single domain and rotates over the
+# domains, so step k trains on domain k % num_domains. Batches stay homogeneous,
+# which makes per-domain reward/advantage statistics meaningful and keeps a
+# long-tailed domain from being drowned out; a domain whose remaining samples
+# cannot fill a whole batch is skipped for that epoch.
+domain_batching: False
+
+# Column identifying a sample's domain when domain_batching is True.
+domain_key: data_source
+
 # Seed to use when shuffling the data
 seed: null
 
